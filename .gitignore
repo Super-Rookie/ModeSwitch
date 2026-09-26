@@ -1,0 +1,6 @@
+# build output - rebuild with build.ps1
+bin/*.exe
+*.pdb
+
+# per-machine runtime log
+bin/*.log
