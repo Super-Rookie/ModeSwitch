@@ -179,6 +179,78 @@ static class Nv
         finally { if (destroy != null) destroy(session); }
     }
 
+    // ---- driver version ----
+    delegate int FnDriverVersion(out uint version, StringBuilder branch);
+
+    // Returns e.g. "616.64", or null if NVAPI is unavailable.
+    public static string DriverVersion()
+    {
+        if (!Init()) return null;
+        var fn = Get<FnDriverVersion>(0x2926AAAD);   // NvAPI_SYS_GetDriverAndBranchVersion
+        if (fn == null) return null;
+        uint v;
+        var branch = new StringBuilder(64);
+        if (fn(out v, branch) != 0) return null;
+        return string.Format(CultureInfo.InvariantCulture, "{0}.{1:00}", v / 100, v % 100);
+    }
+
+    // ---- verification ----
+    delegate int FnGetSetting(IntPtr session, IntPtr profile, uint id, IntPtr setting);
+    const int NVAPI_SETTING_NOT_FOUND = -160;
+
+    // Reads each setting back from the saved driver profile in a fresh session.
+    // Returns one line per mismatch (empty list = all good), or null if the check itself failed.
+    public static List<string> VerifyProfileSettings(List<KeyValuePair<uint, uint>> settings, out string error)
+    {
+        error = null;
+        var problems = new List<string>();
+        if (settings.Count == 0) return problems;
+        if (!Init()) { error = "NVAPI unavailable"; return null; }
+
+        var createSession = Get<FnOut>(0x0694D52E);
+        var loadSettings = Get<FnIn>(0x375DBD6B);
+        var getBase = Get<FnInOut>(0xDA8466A0);
+        var getSetting = Get<FnGetSetting>(0x73BF8338);
+        var destroy = Get<FnIn>(0xDAD9CFF8);
+        if (createSession == null || getSetting == null) { error = "NVAPI DRS entry points missing"; return null; }
+
+        IntPtr session;
+        int rc = createSession(out session);
+        if (rc != 0) { error = "DRS_CreateSession rc=" + rc; return null; }
+        try
+        {
+            rc = loadSettings(session);
+            if (rc != 0) { error = "DRS_LoadSettings rc=" + rc; return null; }
+            IntPtr profile;
+            rc = getBase(session, out profile);
+            if (rc != 0) { error = "DRS_GetBaseProfile rc=" + rc; return null; }
+
+            IntPtr buf = Marshal.AllocHGlobal(SETTING_SIZE);
+            try
+            {
+                foreach (var kv in settings)
+                {
+                    for (int b = 0; b < SETTING_SIZE; b++) Marshal.WriteByte(buf, b, 0);
+                    Marshal.WriteInt32(buf, 0, unchecked((int)SETTING_VER));
+                    rc = getSetting(session, profile, kv.Key, buf);
+                    if (rc == NVAPI_SETTING_NOT_FOUND)
+                        problems.Add(string.Format("0x{0:X8} is not a known setting in this driver", kv.Key));
+                    else if (rc != 0)
+                        problems.Add(string.Format("0x{0:X8} could not be read (rc={1})", kv.Key, rc));
+                    else
+                    {
+                        uint actual = (uint)Marshal.ReadInt32(buf, OFF_CURRENT);
+                        if (actual != kv.Value)
+                            problems.Add(string.Format("0x{0:X8} is 0x{1:X} instead of 0x{2:X}", kv.Key, actual, kv.Value));
+                    }
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+            return problems;
+        }
+        finally { if (destroy != null) destroy(session); }
+    }
+
     // ---- clock offsets ----
     const int CLOCK_SIZE = 44, BASEVOLT_SIZE = 24;
     const int PSTATE_SIZE = 4 + 4 + (8 * CLOCK_SIZE) + (4 * BASEVOLT_SIZE);
@@ -510,6 +582,7 @@ class ModeSwitchApp : ApplicationContext
     const string HagsKey = @"SYSTEM\CurrentControlSet\Control\GraphicsDrivers";
 
     bool headless;
+    volatile string driverNote;          // "NVIDIA driver changed: A -> B", reported with the next switch
     volatile bool busy;                  // a switch is running on a background thread
     volatile string pendingTarget;       // mode being switched to, for the icon
     Control syncCtl;                     // marshals results back to the UI thread
@@ -548,6 +621,7 @@ class ModeSwitchApp : ApplicationContext
         tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) Switch(mode == "movie" ? "game" : "movie"); };
         BuildMenu();
         UpdateIcon();
+        CheckDriverVersion();
 
         // Things like the Afterburner curve and Windows HDR do not survive a reboot, so re-apply
         // the stored mode shortly after logon. GPU scheduling already matches, so no reboot prompt.
@@ -583,6 +657,72 @@ class ModeSwitchApp : ApplicationContext
             using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RegKey)) k.SetValue("Mode", mode);
         }
         catch { }
+    }
+
+    static string ReadReg(string name)
+    {
+        try
+        {
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RegKey))
+                return k == null ? null : k.GetValue(name) as string;
+        }
+        catch { return null; }
+    }
+
+    static void WriteReg(string name, string value)
+    {
+        try { using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RegKey)) k.SetValue(name, value); }
+        catch { }
+    }
+
+    // A driver update can reset NVIDIA settings or, rarely, change setting IDs/values. Remember the
+    // version; when it changes, say so and make sure the settings get re-applied and read back.
+    void CheckDriverVersion()
+    {
+        try { CheckDriverVersionCore(); }
+        catch (Exception ex) { WriteLog("startup", "driver version check failed: " + ex.Message); }
+    }
+
+    void CheckDriverVersionCore()
+    {
+        string now = Nv.DriverVersion();
+        if (now == null) { WriteLog("startup", "could not read the NVIDIA driver version"); return; }
+        string last = ReadReg("DriverVersion");
+        WriteReg("DriverVersion", now);
+        if (ReadReg("DriverVersion") != now) WriteLog("startup", "could not store the driver version in the registry");
+        if (last == null || last == now) return;
+
+        driverNote = string.Format("NVIDIA driver changed: {0} -> {1}", last, now);
+        if (cfg.GetBool("apply.onstart", true))
+        {
+            Notify(driverNote + "\nSettings will be re-applied and checked in a moment.", false);
+            return;                                  // the startup re-apply reports the result
+        }
+
+        // No automatic re-apply configured: just check the current mode's settings in place.
+        string checkMode = mode;
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            var settings = cfg.GetSettings("vsync.both");
+            settings.AddRange(cfg.GetSettings("gsync." + checkMode));
+            string text = driverNote + "\n" + DescribeVerification(settings);
+            driverNote = null;
+            WriteLog("check after driver change", text);
+            try { syncCtl.BeginInvoke((MethodInvoker)delegate { Notify(text, text.IndexOf("FAILED", StringComparison.Ordinal) >= 0); }); }
+            catch { }
+        });
+    }
+
+    static string DescribeVerification(List<KeyValuePair<uint, uint>> settings)
+    {
+        string err;
+        List<string> problems = Nv.VerifyProfileSettings(settings, out err);
+        string drv = Nv.DriverVersion();
+        string onDriver = drv == null ? "" : " (driver " + drv + ")";
+        if (problems == null) return "NVIDIA check FAILED" + onDriver + ": " + err;
+        if (problems.Count == 0) return "NVIDIA settings applied and verified" + onDriver;
+        return "NVIDIA check FAILED" + onDriver + ": " + string.Join("; ", problems.ToArray())
+             + "\nRun bin\\NvProbe.exe and update config.ini (see README: Driver updates).";
     }
 
     static int HagsValue()
@@ -711,6 +851,7 @@ class ModeSwitchApp : ApplicationContext
                     pendingTarget = null;
                     UpdateIcon();
                     bool problem = text.IndexOf("rc=", StringComparison.Ordinal) >= 0 || text.StartsWith("failed")
+                                || text.IndexOf("FAILED", StringComparison.Ordinal) >= 0
                                 || text.IndexOf("did not take effect", StringComparison.Ordinal) >= 0
                                 || text.IndexOf("exited", StringComparison.Ordinal) >= 0;
 
@@ -737,13 +878,16 @@ class ModeSwitchApp : ApplicationContext
         bool isGame = target == "game";
         string p = isGame ? "game" : "movie";
 
-        // 1. NVIDIA profile settings: V-Sync (both modes) + G-Sync (per mode)
+        string note = driverNote;
+        if (note != null) { log.AppendLine(note); driverNote = null; }
+
+        // 1. NVIDIA profile settings: V-Sync (both modes) + G-Sync (per mode), then read them back
         var settings = cfg.GetSettings("vsync.both");
         settings.AddRange(cfg.GetSettings("gsync." + p));
         if (settings.Count > 0)
         {
             string err = Nv.ApplyProfileSettings(settings);
-            log.AppendLine(err == null ? "NVIDIA profile settings applied" : "NVIDIA settings: " + err);
+            log.AppendLine(err != null ? "NVIDIA settings FAILED: " + err : DescribeVerification(settings));
         }
 
         // 2. GPU clocks. The undervolt is a 127-point V/F curve that only Afterburner can apply,

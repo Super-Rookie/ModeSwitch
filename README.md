@@ -133,18 +133,37 @@ For reference, driver 616.64 used:
 Enabling G-SYNC in NVIDIA Control Panel can reset Vertical Sync to "Use the 3D application
 setting", which is why V-Sync is re-applied on every switch.
 
+## Driver updates
+
+You normally don't need to change anything when NVIDIA releases a new driver.
+
+- **Every switch verifies the NVIDIA settings.** After writing G-SYNC and V-Sync, ModeSwitch opens
+  a fresh session with the driver and reads each value back. The notification and log say
+  `NVIDIA settings applied and verified (driver 616.64)`, or `NVIDIA check FAILED` with the exact
+  setting that didn't stick, including when the driver no longer recognises a setting ID.
+- **Driver changes are detected at logon.** The driver version is remembered. When it changes,
+  a notification says `NVIDIA driver changed: 616.64 -> 620.10`. The automatic re-apply after logon
+  then restores any settings the installer reset, and verifies them.
+
+If a check fails after an update, NVIDIA has changed a setting ID or value. That's a config edit,
+not a new version: set G-SYNC / V-Sync in NVIDIA Control Panel, run `bin\NvProbe.exe`, and update
+`config.ini` (see [Finding NVIDIA setting IDs](#finding-nvidia-setting-ids-for-your-driver)).
+
 ## Log
 
 Every switch is appended to `bin\ModeSwitch.log`, one block per switch, recording what each
 display and Afterburner actually reported rather than what was requested:
 
 ```
-=== 2026-09-26 15:00:00  switch to game ===
-NVIDIA profile settings applied
+=== 2026-09-26 15:23:35  switch to game ===
+NVIDIA driver changed: 999.99 -> 616.64
+NVIDIA settings applied and verified (driver 616.64)
 Afterburner: Profile1 applied
 HDR on LG TV: on
 GPU scheduling: on after reboot
 ```
+
+The "driver changed" line only appears on the first switch after a driver update.
 
 Overrides only appear when they change something, e.g. `Afterburner: Profile1 applied (memory +1500 MHz)`.
 
@@ -154,6 +173,7 @@ Overrides only appear when they change something, e.g. `Afterburner: Profile1 ap
 |---|---|
 | `install.ps1 cannot be loaded because running scripts is disabled` | Use the `-ExecutionPolicy Bypass` form shown above |
 | Log says `Afterburner exited` | Enable "Start with Windows" in Afterburner (see Afterburner setup) |
+| `NVIDIA check FAILED` after a driver update | Re-read the setting IDs/values with `NvProbe.exe` and update `config.ini` (see Driver updates) |
 | HDR state looks wrong | HDR is read with the 24H2+ query, which separates HDR from Auto Color Management. On older Windows builds the fallback cannot make that distinction |
 | A setting failed | Check `bin\ModeSwitch.log`; errors include the API return code |
 | Can't rebuild: file in use | The app is running elevated; right-click → Exit first |
