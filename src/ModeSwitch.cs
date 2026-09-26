@@ -822,6 +822,11 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         if (rebootPending) menu.Items.Add(new ToolStripMenuItem("Reboot now", null, (s, e) => Reboot()));
+        menu.Items.Add(new ToolStripMenuItem("NVIDIA Control Panel", null, (s, e) =>
+            OpenAsUser(cfg.Get("open.nvcp", @"shell:AppsFolder\NVIDIACorp.NVIDIAControlPanel_56jybvy8sckqj!NVIDIACorp.NVIDIAControlPanel"))));
+        menu.Items.Add(new ToolStripMenuItem("Windows display settings", null, (s, e) =>
+            OpenAsUser(cfg.Get("open.display", "ms-settings:display"))));
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open config.ini", null, (s, e) => Process.Start("notepad.exe", cfg.Path)));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (s, e) => { tray.Visible = false; Application.Exit(); }));
     }
@@ -961,6 +966,14 @@ class ModeSwitchApp : ApplicationContext
         StoreMode();
         WriteLog(target, log.ToString().TrimEnd());
         return log.ToString().TrimEnd();
+    }
+
+    // ModeSwitch runs elevated, and Store apps and Settings pages don't launch reliably from an
+    // elevated process. Explorer runs as the normal user, so let it open the target.
+    void OpenAsUser(string target)
+    {
+        try { Process.Start(new ProcessStartInfo("explorer.exe", "\"" + target + "\"") { UseShellExecute = false }); }
+        catch (Exception ex) { Notify("Could not open " + target + ": " + ex.Message, true); }
     }
 
     static void RunHidden(string exe, string args, StringBuilder log, string label)

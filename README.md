@@ -84,6 +84,7 @@ deletes the folder.
   - **Refresh rate**: a submenu per display, listing every rate at its current resolution
   - **HDR**: current state, with each display listed and ticked if HDR is on; click one to toggle it
   - Reboot now (only while a reboot is pending)
+  - **NVIDIA Control Panel** and **Windows display settings**, opened as your normal user (not elevated)
   - Open config.ini
   - Exit
 
@@ -110,6 +111,7 @@ Afterburner curve and Windows HDR do not survive a reboot on their own.
 | `ab.<mode>.stopafter` | close Afterburner once the profile is applied |
 | `oc.<mode>.clearoffsets` | reset flat pstate clock offsets to 0 (separate from the curve) |
 | `apps.<mode>.stop`, `apps.<mode>.start` | extra processes to close / a program to start (`path|args`) |
+| `open.nvcp`, `open.display` | what the menu shortcuts open: NVIDIA Control Panel's Store app ID, and a `ms-settings:` page |
 
 ### Finding NVIDIA setting IDs for your driver
 
