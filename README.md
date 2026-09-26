@@ -111,6 +111,7 @@ Afterburner curve and Windows HDR do not survive a reboot on their own.
 | `ab.<mode>.stopafter` | close Afterburner once the profile is applied |
 | `oc.<mode>.clearoffsets` | reset flat pstate clock offsets to 0 (separate from the curve) |
 | `apps.<mode>.stop`, `apps.<mode>.start` | extra processes to close / a program to start (`path|args`) |
+| `log.maxkb` | log size limit before it rotates to `ModeSwitch.old.log` |
 | `open.nvcp`, `open.display` | what the menu shortcuts open: NVIDIA Control Panel's Store app ID, and a `ms-settings:` page |
 
 ### Finding NVIDIA setting IDs for your driver
@@ -166,6 +167,10 @@ GPU scheduling: on after reboot
 ```
 
 The "driver changed" line only appears on the first switch after a driver update.
+
+The log is size-limited. Once it passes `log.maxkb` (default 256 KB, roughly a thousand switches),
+it's renamed to `ModeSwitch.old.log`, replacing the previous one, and a new log starts. At most
+about twice the limit is ever on disk.
 
 Overrides only appear when they change something, e.g. `Afterburner: Profile1 applied (memory +1500 MHz)`.
 

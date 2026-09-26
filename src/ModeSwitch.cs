@@ -1038,6 +1038,18 @@ class ModeSwitchApp : ApplicationContext
         try
         {
             string path = Path.Combine(exeDir, "ModeSwitch.log");
+
+            // Keep the log bounded: past the limit, it becomes ModeSwitch.old.log (replacing the
+            // previous one) and a fresh log starts, so at most ~2x the limit is ever on disk.
+            long maxBytes = Math.Max(16, cfg.GetInt("log.maxkb", 256)) * 1024L;
+            var info = new FileInfo(path);
+            if (info.Exists && info.Length > maxBytes)
+            {
+                string old = Path.Combine(exeDir, "ModeSwitch.old.log");
+                if (File.Exists(old)) File.Delete(old);
+                File.Move(path, old);
+            }
+
             var sb = new StringBuilder();
             sb.AppendLine(string.Format("=== {0:yyyy-MM-dd HH:mm:ss}  switch to {1}{2} ===",
                 DateTime.Now, target, headless ? " (headless)" : ""));
