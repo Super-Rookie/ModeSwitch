@@ -1054,8 +1054,15 @@ class ModeSwitchApp : ApplicationContext
         syncCtl = new Control();
         { IntPtr forceHandle = syncCtl.Handle; }   // create the handle so BeginInvoke works
         tray.Visible = true;
-        // No left-click action: every switch goes through the right-click menu, where the current
-        // mode is ticked, so a stray click can't change modes (and GPU scheduling) by accident.
+        // Left-click opens the same menu as right-click. Nothing switches on a click by itself, so a
+        // stray click can't change modes (and GPU scheduling) by accident. NotifyIcon only opens
+        // its menu on right-click; its private ShowContextMenu positions it the same way.
+        tray.MouseUp += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            var show = typeof(NotifyIcon).GetMethod("ShowContextMenu", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (show != null) show.Invoke(tray, null);
+        };
         BuildMenu();
         UpdateIcon();
         CheckDriverVersion();

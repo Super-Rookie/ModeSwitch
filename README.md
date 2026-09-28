@@ -185,10 +185,10 @@ deletes the folder.
 
 ## Using it
 
-Everything is on the **right-click** menu, with the current mode ticked. Left-click does nothing on
-purpose, so a stray click can't switch modes (and GPU scheduling) by accident.
+**Left- or right-click** opens the menu, with the current mode ticked. A click never switches
+anything by itself, so a stray click can't change modes (and GPU scheduling) by accident.
 
-- **Right-click** for:
+- The menu has:
   - Movie mode / 3D Movie mode / Game mode
   - **Play 3D Blu-ray / 3D film…**
   - **Refresh rate**: a submenu per display, listing every rate at its current resolution
