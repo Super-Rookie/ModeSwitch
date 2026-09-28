@@ -1054,7 +1054,8 @@ class ModeSwitchApp : ApplicationContext
         syncCtl = new Control();
         { IntPtr forceHandle = syncCtl.Handle; }   // create the handle so BeginInvoke works
         tray.Visible = true;
-        tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) Switch(mode == "movie" ? "game" : "movie"); };
+        // No left-click action: every switch goes through the right-click menu, where the current
+        // mode is ticked, so a stray click can't change modes (and GPU scheduling) by accident.
         BuildMenu();
         UpdateIcon();
         CheckDriverVersion();

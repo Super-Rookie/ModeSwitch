@@ -29,8 +29,7 @@ Every value is set in `bin\config.ini`, so the presets can be changed without re
 
 ## 3D Movie mode
 
-A third mode, chosen from the right-click menu (left-click still toggles Movie ↔ Game). It shows a
-purple **3D** icon.
+A third mode, chosen from the right-click menu like the others. It shows a purple **3D** icon.
 
 3D Movie inherits **every Movie setting**: GPU scheduling, G-SYNC, HDR, Afterburner, sound. It
 only overrides what it sets itself, so switching between Movie and 3D Movie never needs a reboot.
@@ -186,9 +185,12 @@ deletes the folder.
 
 ## Using it
 
-- **Left-click** the icon to switch to the other mode.
+Everything is on the **right-click** menu, with the current mode ticked. Left-click does nothing on
+purpose, so a stray click can't switch modes (and GPU scheduling) by accident.
+
 - **Right-click** for:
-  - Movie mode / Game mode
+  - Movie mode / 3D Movie mode / Game mode
+  - **Play 3D Blu-ray / 3D film…**
   - **Refresh rate**: a submenu per display, listing every rate at its current resolution
   - **HDR**: current state, with each display listed and ticked if HDR is on; click one to toggle it
   - **Sound**: the current output and format, with the four presets underneath; the active one is ticked
