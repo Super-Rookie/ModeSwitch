@@ -153,6 +153,99 @@ afterwards with Win+P is left alone.
 
 **Room setup → Check devices** reads every device's state without changing anything.
 
+## Settings window (picture)
+
+**Settings…** in the tray menu opens a dark, always-on-top window with two tabs. OK / Apply save
+to `bin\settings.ini`, which ModeSwitch writes itself. It overrides `config.ini` and is kept out
+of git.
+
+Each profile has **3 save slots** (Saved settings → Save / Restore), so you can experiment and
+go back:
+
+- **Projector**: 3 slots per projector preset. A slot holds that preset's colour temperature,
+  gamma, contrast, brightness, colour, hue, sharpness and R/G/B gain and bias. Restore sends them
+  back to the projector.
+- **GPU colour**: 3 slots per mode and display. Restore loads the slot into the controls (and
+  previews it); OK makes it the saved setting.
+
+Slots are saved straight away, with the time they were saved, whether or not you then press OK.
+
+A 4th slot, **Default (locked)**, holds the settings as they were when first captured. That's
+every projector preset's picture values, and neutral GPU colour for every mode and display. It
+can be restored at any time but never saved over, so there's always a way back. Its keys are
+`pjslot.<preset>.default` and `gpuslot.<mode>.<display>.default` in `settings.ini`.
+
+### Projector picture
+
+- **Picture preset for each mode**: Movie / 3D Movie / Game each pick one of the projector's
+  presets (Cinema Film 1/2, Reference, TV, Photo, Game, Bright Cinema, Bright TV, User), or leave
+  it as it is. It's set on every switch. After a Theatre room switch it's set once the projector
+  has warmed up.
+- **Adjust the projector's picture**: live controls for the preset showing now: contrast,
+  brightness, colour, hue, sharpness, colour temperature, gamma, and R/G/B gain and bias. Changes
+  go straight to the projector, which keeps them inside that preset, so each mode's preset
+  carries its own adjustments. Picking another preset under "Showing now" switches the projector
+  to it and reads its values.
+
+### Projector 3D
+
+The projector keeps **separate picture memory for 3D**: its own current preset, and its own
+adjustments for every preset. Measured on the VW760ES: switching 3D on moved it from User to
+Cinema Film 1, and Reference has contrast 99 in 2D but 92 in 3D. So 3D has its own tab:
+
+- **3D films**: the preset set when a 3D film starts with Play 3D… (`pj.3dplay.preset`), after the
+  projector has switched to 3D.
+- The same live adjustments, plus **3D depth** (−2 to +2, item `0x0062`), and 3 slots plus a locked
+  Default per 3D preset (`pj3dslot.*`).
+
+Each tab only edits while the projector shows its kind of picture; otherwise its controls are
+locked with a note. 3D is detected by the 3D Depth item, which only answers in 3D. So a 2D
+adjustment can never land in 3D memory, or the other way round. To adjust 3D, start a 3D film.
+
+**3D view.** In frame-compatible 3D the projector splits every frame between the eyes and
+stretches each half back to full size. For Over-Under (TAB) that's top and bottom; for
+Side-by-Side (SBS) it's left and right. A normal window would come out cut in half and
+stretched. So while the projector shows 3D (checked every 2 s), the Settings window is drawn as
+two copies. Each is squashed to half height (TAB) or half width (SBS), one in each half, so each
+eye sees one copy at its normal shape. The real window waits off screen and comes back when 3D
+ends. Clicks on either copy are mapped back to the real controls:
+
+- sliders drag and wheel as normal
+- buttons and checkboxes click as normal
+- number boxes step with their arrows or the wheel (click the box to type)
+- lists step to the next item on a click, or with the wheel, because their drop-downs would open
+  off screen
+
+The **3D view** checkbox turns it off.
+
+Item numbers are from Sony's VPL-VW protocol manual (SDCP):
+
+| Item | Setting | Values |
+|---|---|---|
+| `0x0002` | Calib. preset | 0 Cinema Film 1, 1 Cinema Film 2, 2 Reference, 3 TV, 4 Photo, 5 Game, 6 Bright Cinema, 7 Bright TV, 8 User |
+| `0x0010`–`0x0014` | Contrast, Brightness, Colour, Hue, Sharpness | 0–100 |
+| `0x0017` | Colour temp | 0 D93, 1 D75, 2 D65, 9 D55, 3–6 and 8 Custom 1–5 |
+| `0x0022` | Gamma correction | 0 Off, 1 1.8, 2 2.0, 3 2.1, 4 2.2, 5 2.4, 6 2.6, 7–10 Gamma 7–10 |
+| `0x0050`–`0x0055` | Gain R/G/B, Bias R/G/B | −30 to +30 (16-bit signed) |
+
+### GPU colour
+
+Per mode and per display (the TV, the projector):
+
+- **Brightness, contrast and gamma**, for all channels or red, green and blue separately. These are
+  applied through the display's gamma ramp, like NVIDIA Control Panel's desktop colour settings.
+- **Digital vibrance** (0–100 %, 50 = unchanged) and **hue** (0–359°), through NVAPI.
+
+ModeSwitch applies them on every mode or room switch, after the resolution and HDR changes (which
+reset the gamma ramp). With **Preview on screen**, changes for the current mode show as you
+make them, and Cancel puts back what was saved.
+
+- The gamma ramp has no effect while Windows HDR is on; vibrance and hue still apply.
+- A display that has no custom colour in any mode is left alone, so NVIDIA Control Panel settings
+  stay. Once one mode has custom colour, the other modes use neutral on that display.
+- Windows refuses gamma ramps that stray too far from neutral. The error says so. Setting
+  `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiIcmGammaRange = 256` lifts the limit.
+
 ## Sound presets
 
 Four presets, applied to the **current default playback device** (e.g. the TV or AV receiver
@@ -255,6 +348,7 @@ anything by itself, so a stray click can't change modes (and GPU scheduling) by 
   - **Sound**: the current output and format, with the four presets underneath; the active one is ticked
   - Reboot now (only while a reboot is pending)
   - **NVIDIA Control Panel** and **Windows display settings**, opened as your normal user (not elevated)
+  - **Settings…**: the picture settings window (see [Settings window](#settings-window-picture))
   - Open config.ini (and config.local.ini, if there is one)
   - Exit
 
@@ -413,10 +507,13 @@ no SDK or Visual Studio is needed. The source avoids C# 6+ syntax for that reaso
 | `src\ModeSwitch.cs` | the tray app |
 | `src\Room.cs` | TV / receiver / Tapo plug control, and which display Windows uses |
 | `src\RoomSound.cs` | the Volume submenu |
+| `src\Picture.cs` | projector picture items, and GPU colour (gamma ramp, vibrance, hue) |
+| `src\Settings.cs` | the Settings window |
 | `src\NvProbe.cs` | read-only dump of sync-related NVIDIA driver profile settings |
 | `src\NvClocks.cs` | read, or set, GPU pstate clock offsets |
 | `bin\config.ini` | all settings |
 | `bin\config.local.ini` | your device addresses (not in git) |
+| `bin\settings.ini` | written by the Settings window (not in git) |
 | `install.ps1` | installer / uninstaller |
 | `build.ps1` | builds everything into `bin\` |
 

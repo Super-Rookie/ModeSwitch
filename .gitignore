@@ -5,3 +5,4 @@ bin/*.exe
 # per-machine runtime log
 bin/*.log
 bin/config.local.ini
+bin/settings.ini

@@ -20,13 +20,47 @@ class Config
     readonly Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     public string Path;
 
-    // Reads config.ini, then config.local.ini next to it (if present), whose keys win. The local
-    // file holds this home's device addresses and stays out of source control.
+    // Reads config.ini, then config.local.ini next to it (if present), then settings.ini; later files
+    // win. The local file holds this home's device addresses; settings.ini is written by the
+    // Settings window. Neither is in source control.
     public Config(string path)
     {
         Path = path;
-        Load(path);
-        Load(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path), "config.local.ini"));
+        Reload();
+    }
+
+    public string SettingsPath { get { return System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Path), "settings.ini"); } }
+
+    public void Reload()
+    {
+        map.Clear();
+        Load(Path);
+        Load(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Path), "config.local.ini"));
+        Load(SettingsPath);
+    }
+
+    // Merges `values` into settings.ini (a null value removes the key) and reloads.
+    public void SaveSettings(IDictionary<string, string> values)
+    {
+        var all = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(SettingsPath))
+            foreach (string raw in File.ReadAllLines(SettingsPath))
+            {
+                string line = raw.Trim();
+                int eq = line.IndexOf('=');
+                if (line.Length == 0 || line.StartsWith("#") || eq <= 0) continue;
+                all[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+            }
+        foreach (var kv in values)
+        {
+            if (kv.Value == null) all.Remove(kv.Key);
+            else all[kv.Key] = kv.Value;
+        }
+        var sb = new StringBuilder();
+        sb.AppendLine("# Written by ModeSwitch's Settings window. Overrides config.ini and config.local.ini.");
+        foreach (var kv in all) sb.AppendLine(kv.Key + " = " + kv.Value);
+        File.WriteAllText(SettingsPath, sb.ToString());
+        Reload();
     }
 
     void Load(string path)
@@ -1344,10 +1378,13 @@ class ModeSwitchApp : ApplicationContext
                     return "Projector: could not confirm - " + e;
             }
             ok = true;
+            string preset = "";
+            foreach (var kv in items)
+                if (kv.Key == PjPicture.Preset) preset = PjPicture.PresetName((int)kv.Value) + ", ";
             int ds, fmt;
             if (Pj.Get(ip, com, Pj.ItemDisplaySelect, out ds) == null && Pj.Get(ip, com, Pj.ItemFormat3D, out fmt) == null)
-                return "Projector: " + Pj.Describe(ds, fmt);
-            return offAnyway ? "Projector: 2D (3D isn't available at this resolution)" : "Projector: 2D";
+                return "Projector: " + preset + Pj.Describe(ds, fmt);
+            return "Projector: " + preset + (offAnyway ? "2D (3D isn't available at this resolution)" : "2D");
         }
         catch (Exception ex) { return "Projector FAILED: " + ex.Message; }
     }
@@ -1585,6 +1622,7 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("Windows display settings", null, (s, e) =>
             OpenAsUser(cfg.Get("open.display", "ms-settings:display"))));
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Settings...", null, (s, e) => ShowSettings()));
         menu.Items.Add(new ToolStripMenuItem("Open config.ini", null, (s, e) => Process.Start("notepad.exe", cfg.Path)));
         string localCfg = Path.Combine(exeDir, "config.local.ini");
         if (File.Exists(localCfg)) menu.Items.Add(new ToolStripMenuItem("Open config.local.ini", null, (s, e) => Process.Start("notepad.exe", localCfg)));
@@ -1771,6 +1809,10 @@ class ModeSwitchApp : ApplicationContext
             var pjWanted = fmt == 0
                 ? new List<KeyValuePair<uint, uint>> { new KeyValuePair<uint, uint>(Pj.ItemDisplaySelect, 0) }
                 : Projector3D(fmt);
+            // The projector keeps a separate preset for 3D; set it once 3D is on (Settings > Projector 3D).
+            int preset3d = cfg.GetInt("pj.3dplay.preset", -1);
+            if (fmt != 0 && preset3d >= 0 && preset3d < PjPicture.Presets.Length)
+                pjWanted.Add(new KeyValuePair<uint, uint>(PjPicture.Preset, (uint)preset3d));
             string pjLine = ApplyProjector(pjWanted, true, out pjOk);
             if (pjLine != null) log.AppendLine(pjLine);
             string pjNote = !pjOk ? cfg.Get("reminder.3d", "Set the projector's 3D format to match the film.")
@@ -1972,7 +2014,7 @@ class ModeSwitchApp : ApplicationContext
         //     try once now...
         bool pjOk = false;
         string pjLine = null;
-        var pjItems = cfg.GetSettings("projector." + p);
+        var pjItems = PjItemsFor(p);
         if (pjItems.Count > 0) pjLine = ApplyProjector(pjItems, false, out pjOk);
 
         // 2c. Display resolution/refresh (e.g. 3D Movie: projector to 1080p, Movie: back to 4K).
@@ -1990,6 +2032,10 @@ class ModeSwitchApp : ApplicationContext
         if (herr != null) log.AppendLine(herr);
         foreach (var t in Disp.Targets())                 // report what the display actually reports
             if (t.HdrCapable) log.AppendLine(string.Format("HDR on {0}: {1}", t.Name, t.HdrOn ? "on" : "off"));
+
+        // 3a. GPU colour (Settings > GPU colour): after the resolution and HDR changes, which reset
+        //     the gamma ramp.
+        ApplyGpuColour(p, log);
 
         // 3b. Sound preset. After HDR, because an HDR change re-negotiates the HDMI link, which can
         //     briefly reset the TV/receiver audio device.
@@ -2047,6 +2093,119 @@ class ModeSwitchApp : ApplicationContext
         StoreMode();
         WriteLog(target, log.ToString().TrimEnd());
         return log.ToString().TrimEnd();
+    }
+
+    // ---- picture (Settings window) ----
+    // projector.<mode> items, with the mode's projector preset (pj.<mode>.preset) first.
+    List<KeyValuePair<uint, uint>> PjItemsFor(string p)
+    {
+        var items = cfg.GetSettings("projector." + p);
+        int preset = cfg.GetInt("pj." + p + ".preset", -1);
+        if (preset >= 0 && preset < PjPicture.Presets.Length)
+        {
+            items.RemoveAll(kv => kv.Key == PjPicture.Preset);
+            items.Insert(0, new KeyValuePair<uint, uint>(PjPicture.Preset, (uint)preset));
+        }
+        return items;
+    }
+
+    public static readonly string[] ColourRooms = { "tv", "theatre" };
+
+    // Display names for a room, most preferred first (room.<room>.display).
+    public string[] RoomDisplays(string r)
+    {
+        string names = cfg.Get("room." + r + ".display", r == "theatre" ? "SONY PJ, SONY AVSYSTEM" : "LG TV");
+        return Array.ConvertAll(names.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries), s => s.Trim());
+    }
+
+    // gpu.<mode>.<room>.* -> custom (on/off) and the values; defaults are neutral.
+    public GpuColour.Values GpuValues(string p, string r, out bool custom)
+    {
+        string k = "gpu." + p + "." + r + ".";
+        custom = cfg.GetBool(k + "custom", false);
+        return new GpuColour.Values
+        {
+            Brightness = GpuColour.Values.Triple(cfg.Get(k + "brightness", ""), 50),
+            Contrast = GpuColour.Values.Triple(cfg.Get(k + "contrast", ""), 50),
+            Gamma = GpuColour.Values.Triple(cfg.Get(k + "gamma", ""), 100),
+            Vibrance = cfg.GetInt(k + "vibrance", 50),
+            Hue = cfg.GetInt(k + "hue", 0)
+        };
+    }
+
+    // For each room display in use: the mode's custom colour, or neutral in modes without it.
+    // Displays never given custom colour in any mode are left alone (e.g. set in NVIDIA Control Panel).
+    void ApplyGpuColour(string p, StringBuilder log)
+    {
+        foreach (string r in ColourRooms)
+        {
+            bool anyCustom = false, custom;
+            foreach (string m in new[] { "movie", "3d", "game" }) { GpuValues(m, r, out custom); anyCustom |= custom; }
+            if (!anyCustom) continue;
+            foreach (string name in RoomDisplays(r))
+            {
+                string monitor;
+                string gdi = Disp.FindDisplay(name, out monitor);
+                if (gdi == null) continue;
+                var v = GpuValues(p, r, out custom);
+                if (!custom) v = new GpuColour.Values();
+                bool hdr = false;
+                foreach (var t in Disp.Targets()) if (t.Name.Trim() == monitor && t.HdrOn) hdr = true;
+                string err = GpuColour.Apply(gdi, v, hdr);
+                log.AppendLine(err != null ? "GPU colour on " + monitor + " FAILED: " + err
+                    : "GPU colour on " + monitor + ": " + v.Describe() + (hdr && !v.RampIsNeutral() ? " (brightness/contrast/gamma not used in HDR)" : ""));
+                break;
+            }
+        }
+    }
+
+    SettingsForm settingsForm;
+
+    void ShowSettings()
+    {
+        if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
+        settingsForm = new SettingsForm(this);
+        settingsForm.Show();
+        settingsForm.Activate();
+    }
+
+    // Used by the Settings window.
+    public Config Cfg { get { return cfg; } }
+    public string CurrentMode { get { return ParseMode(mode); } }
+    public string CurrentRoom { get { return room; } }
+    public static string ModeLabel(string m) { return ModeName(m); }
+    public static string RoomLabel(string r) { return RoomName(r); }
+
+    public void ReloadConfig()
+    {
+        cfg.Reload();
+        cfg.Inherit("3d", "movie");
+    }
+
+    // Writes keys to settings.ini and reloads the config (with 3D inheriting Movie again).
+    public void SaveSettingsNow(IDictionary<string, string> values)
+    {
+        cfg.SaveSettings(values);
+        cfg.Inherit("3d", "movie");
+    }
+
+    // After saving: apply the current mode's GPU colour (and projector preset, if it changed).
+    public void ApplySavedPicture(bool presetChanged)
+    {
+        string p = ParseMode(mode);
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            var log = new StringBuilder();
+            ApplyGpuColour(p, log);
+            if (presetChanged && room == "theatre" && cfg.GetInt("pj." + p + ".preset", -1) >= 0)
+            {
+                bool ok;
+                string line = ApplyProjector(PjItemsFor(p), true, out ok);
+                if (line != null) log.AppendLine(line);
+            }
+            string text = log.ToString().TrimEnd();
+            if (text.Length > 0) WriteLog("settings saved", text);
+        });
     }
 
     // ---- rooms ----
@@ -2172,9 +2331,20 @@ class ModeSwitchApp : ApplicationContext
         if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
         string herr = Disp.SetHdr(cfg.GetBool("hdr." + p, p == "game"));
         if (herr != null) log.AppendLine(herr);
+        ApplyGpuColour(p, log);
         string soundLine = ApplyRoomSound(p);
         if (soundLine != null) log.AppendLine(soundLine);
         timed("mode settings");
+
+        // The mode's projector preset once it has warmed up (it refuses settings until then).
+        if (theatre && pjIp.Length > 0 && cfg.GetInt("pj." + p + ".preset", -1) >= 0)
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                WaitForProjector();
+                bool ok;
+                string line = ApplyProjector(PjItemsFor(p), true, out ok);
+                if (line != null) WriteLog("projector preset", line);
+            });
 
         string text = log.ToString().TrimEnd();
         WriteLog("room " + target, text + string.Format("\ntook {0:0}s: {1}", clock.Elapsed.TotalSeconds, string.Join(", ", timings.ToArray())));
@@ -2449,6 +2619,7 @@ class ModeSwitchApp : ApplicationContext
                 log.AppendLine(SetRoomAudio(cfg.Get("room." + target + ".audio", target == "theatre" ? "SONY AVSYSTEM" : "LG TV")));
                 string res = cfg.Get("display." + p, "");
                 if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+                ApplyGpuColour(p, log);
                 string soundLine = ApplyRoomSound(p);
                 if (soundLine != null) log.AppendLine(soundLine);
             }
