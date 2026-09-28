@@ -1110,6 +1110,8 @@ class ModeSwitchApp : ApplicationContext
         syncCtl = new Control();
         { IntPtr forceHandle = syncCtl.Handle; }   // create the handle so BeginInvoke works
         tray.Visible = true;
+        roomSound = new RoomSoundMenu(() => cfg.Get("tv.ip", ""), () => cfg.Get("avr.ip", ""), () => cfg.GetInt("avr.volume.max", 0),
+                                      t => OpenTv(t, 5000), syncCtl);
         // Left-click opens the same menu as right-click. Nothing switches on a click by itself, so a
         // stray click can't change modes (and GPU scheduling) by accident. NotifyIcon only opens
         // its menu on right-click; its private ShowContextMenu positions it the same way.
@@ -1509,11 +1511,17 @@ class ModeSwitchApp : ApplicationContext
         theatreRoom.Enabled = !busy && !playing;
         menu.Items.Add(tvRoom);
         menu.Items.Add(theatreRoom);
+        if (roomSound != null) menu.Items.Add(roomSound.Build());
         var setup = new ToolStripMenuItem("Room setup");
+        var subwoofer = new ToolStripMenuItem(SubwooferLabel(), null, (s, e) => ToggleSubwoofer());
+        subwoofer.Checked = subState == 1;
+        setup.DropDownItems.Add(subwoofer);
+        subItem = subwoofer;
+        setup.DropDownOpening += (s, e) => RefreshSubwoofer();
+        setup.DropDownItems.Add(new ToolStripSeparator());
         setup.DropDownItems.Add(new ToolStripMenuItem("Check devices", null, (s, e) => CheckRoomDevices()));
         setup.DropDownItems.Add(new ToolStripMenuItem("Pair TV (accept the prompt on the TV)", null, (s, e) => PairTv()));
-        setup.DropDownItems.Add(new ToolStripMenuItem("Subwoofer plug login...", null, (s, e) => AskTapoLogin()));
-        menu.Items.Add(setup);
+        setup.DropDownItems.Add(new ToolStripMenuItem("Subwoofer plug login...", null, (s, e) => AskTapoLogin()));        menu.Items.Add(setup);
         menu.Items.Add(new ToolStripSeparator());
 
         var refresh = new ToolStripMenuItem("Refresh rate");
@@ -2126,6 +2134,7 @@ class ModeSwitchApp : ApplicationContext
         if (theatre && subIp.Length > 0)
         {
             string e = Tapo.Switch(subIp, true);
+            if (e == null) subState = 1;
             log.AppendLine(e == null ? "Subwoofer: on" : "Subwoofer FAILED: " + e);
             timed("subwoofer");
         }
@@ -2142,6 +2151,7 @@ class ModeSwitchApp : ApplicationContext
             if (subIp.Length > 0)
             {
                 string e = Tapo.Switch(subIp, false);
+                if (e == null) subState = 0;
                 log.AppendLine(e == null ? "Subwoofer: off" : "Subwoofer FAILED: " + e);
             }
             if (pjIp.Length > 0) log.AppendLine(ProjectorPower(pjIp, pjCom, false));
@@ -2255,22 +2265,41 @@ class ModeSwitchApp : ApplicationContext
 
     string TvOff(string ip)
     {
+        // Just after the PC's picture moves away the TV can report a passing state (not "Active")
+        // while it's still on, so only a standby/suspend state counts as off. Then check it went
+        // off, and try again once if not.
+        string err = null, state = null;
         try
         {
-            if (!LgTv.IsUp(ip, 1500)) return "TV: off";
-            using (var tv = new LgTv(ip))
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                string err = OpenTv(tv, 5000);
-                if (err == null)
+                if (!LgTv.IsUp(ip, 1500)) return "TV: off";
+                using (var tv = new LgTv(ip))
                 {
-                    string state = tv.PowerState();
-                    if (state != null && state != "Active") return "TV: off";
+                    err = OpenTv(tv, 5000);
+                    if (err != null) continue;
+                    state = tv.PowerState();
+                    if (IsTvOff(state)) return "TV: off";
                     err = tv.TurnOff();
                 }
-                return err == null ? "TV: off" : "TV FAILED: " + err;
+                for (int i = 0; i < 8; i++)                   // it drops off the network, or reports standby
+                {
+                    System.Threading.Thread.Sleep(1000);
+                    if (!LgTv.IsUp(ip, 1000)) return "TV: off";
+                    using (var tv = new LgTv(ip))
+                        if (OpenTv(tv, 3000) == null && IsTvOff(state = tv.PowerState())) return "TV: off";
+                }
             }
+            return "TV FAILED: still on" + (err != null ? " (" + err + ")" : state != null ? " (reports " + state + ")" : "");
         }
         catch (Exception ex) { return "TV FAILED: " + ex.Message; }
+    }
+
+    static bool IsTvOff(string state)
+    {
+        return state != null && (state.IndexOf("Standby", StringComparison.OrdinalIgnoreCase) >= 0
+                              || state.IndexOf("Suspend", StringComparison.OrdinalIgnoreCase) >= 0
+                              || state.Equals("Off", StringComparison.OrdinalIgnoreCase));
     }
 
     string ReceiverOn(string ip)
@@ -2279,10 +2308,10 @@ class ModeSwitchApp : ApplicationContext
         string err = SonyAvr.GetPower(ip, out on);
         if (err != null)
         {
-            // Once switched off over the network it leaves the network too, and nothing (not even
-            // Wake-on-LAN) brings it back - so ask for the remote. Its picture and sound are up in
-            // seconds but its network takes over a minute, so don't hold the switch up for that:
-            // select the input in the background once it answers (it usually remembers it anyway).
+            // Not on the network: its Network Standby is off (e.g. after a reset; it's switched back
+            // on whenever the receiver is reached) or it was unplugged - so ask for the remote. Its
+            // picture and sound are up in seconds but its network takes over a minute, so don't hold
+            // the switch up for that: select the input in the background once it answers.
             Say("Switch the receiver on with the remote", false);
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
@@ -2305,15 +2334,27 @@ class ModeSwitchApp : ApplicationContext
             if (err != null) return "Receiver FAILED: " + err;
             for (int i = 0; i < 20 && !on; i++) { System.Threading.Thread.Sleep(500); SonyAvr.GetPower(ip, out on); }
         }
+        string note = EnsureReceiverNetworkStart(ip);
         string input = cfg.Get("avr.input", "");
-        if (input.Length == 0) return "Receiver: on";
+        if (input.Length == 0) return "Receiver: on" + note;
         for (int i = 0; i < 6; i++)                          // the input can be refused while it boots
         {
             err = SonyAvr.SetInput(ip, input);
-            if (err == null) return "Receiver: on, input " + cfg.Get("avr.inputname", input);
+            if (err == null) return "Receiver: on, input " + cfg.Get("avr.inputname", input) + note;
             System.Threading.Thread.Sleep(1000);
         }
-        return "Receiver: on, but input FAILED: " + err;
+        return "Receiver: on, but input FAILED: " + err + note;
+    }
+
+    // Keeps Network Standby + Remote Start on (hidden settings on UK/EU models, see SonyAvr), so the
+    // receiver can be switched on over the network. A reset or firmware update could turn them off.
+    // Returns "" or a note for the log line.
+    static string EnsureReceiverNetworkStart(string ip)
+    {
+        bool standby, remote;
+        if (SonyAvr.GetNetworkStart(ip, out standby, out remote) != null || (standby && remote)) return "";
+        string err = SonyAvr.EnableNetworkStart(ip);
+        return err == null ? " (network standby switched back on)" : " (network standby FAILED: " + err + ")";
     }
 
     // SDCP power: 0x0130 = set (1 on, 0 off); 0x0102 = status (0 standby, 1-2 starting, 3 on, 4+ cooling).
@@ -2499,6 +2540,74 @@ class ModeSwitchApp : ApplicationContext
         var t = new Tapo(ip);
         string err = t.Login(user, pass) ?? t.GetInfo(out name, out on);
         return err != null ? "Subwoofer FAILED: " + err : string.Format("Subwoofer plug '{0}': {1}", name, on ? "on" : "off");
+    }
+
+    // The "Volume" submenu (TV and receiver volume, TV sound output).
+    RoomSoundMenu roomSound;
+
+    // "Room setup > Subwoofer": one item, ticked while the sub is on; a click switches it over.
+    // The plug's state is read in the background when Room setup opens (a Tapo login takes ~1 s).
+    volatile int subState = -1;          // -1 unknown, 0 off, 1 on
+    ToolStripMenuItem subItem;           // the item in the menu currently built
+
+    string SubwooferLabel()
+    {
+        return subState == 1 ? "Subwoofer: on" : subState == 0 ? "Subwoofer: off" : "Subwoofer";
+    }
+
+    void ShowSubwooferState()
+    {
+        Ui(delegate
+        {
+            if (subItem == null || subItem.IsDisposed) return;
+            subItem.Text = SubwooferLabel();
+            subItem.Checked = subState == 1;
+        });
+    }
+
+    // Reads the plug's state; returns null on success.
+    string ReadSubwoofer()
+    {
+        string ip = cfg.Get("sub.ip", ""), user, pass, name;
+        bool on = false;
+        if (ip.Length == 0) return "sub.ip isn't set";
+        if (!Tapo.LoadLogin(out user, out pass)) return "no TP-Link login saved";
+        var t = new Tapo(ip);
+        string err = t.Login(user, pass) ?? t.GetInfo(out name, out on);
+        if (err == null) subState = on ? 1 : 0;
+        return err;
+    }
+
+    volatile bool subBusy;
+
+    void RefreshSubwoofer()
+    {
+        if (subBusy || cfg.Get("sub.ip", "").Length == 0) return;
+        subBusy = true;
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            try { ReadSubwoofer(); } catch { }
+            finally { subBusy = false; }
+            ShowSubwooferState();
+        });
+    }
+
+    void ToggleSubwoofer()
+    {
+        string ip = cfg.Get("sub.ip", "");
+        if (ip.Length == 0) { Notify("Set sub.ip in config.local.ini first", true); return; }
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            for (int i = 0; i < 50 && subBusy; i++) System.Threading.Thread.Sleep(100);   // a read in progress
+            string err = subState < 0 ? ReadSubwoofer() : null;        // unknown: find out which way to switch
+            bool on = subState != 1;
+            if (err == null) err = Tapo.Switch(ip, on);
+            if (err == null) subState = on ? 1 : 0;
+            string text = err == null ? "Subwoofer: " + (on ? "on" : "off") : "Subwoofer FAILED: " + err;
+            WriteLog("subwoofer " + (on ? "on" : "off"), text);
+            Say(text, err != null);
+            ShowSubwooferState();
+        });
     }
 
     // "Room setup > Check devices": reads every device's state, changes nothing.

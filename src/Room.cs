@@ -217,6 +217,49 @@ sealed class LgTv : IDisposable
         return Call("ssap://system.notifications/createToast", new Dictionary<string, object> { { "message", text } }, out r);
     }
 
+    // ---- sound ----
+    // getVolume answers {volume, muted} on webOS 4.x and {volumeStatus: {volume, muteStatus}} on 5+.
+    public string GetVolume(out int volume, out bool muted)
+    {
+        volume = 0; muted = false;
+        Dictionary<string, object> r;
+        string err = Call("ssap://audio/getVolume", null, out r);
+        if (err != null) return err;
+        object v = Json.Get(r, "volume") ?? Json.Get(r, "volumeStatus", "volume");
+        object m = Json.Get(r, "muted") ?? Json.Get(r, "volumeStatus", "muteStatus");
+        if (v == null) return "no volume in reply";
+        volume = Convert.ToInt32(v);
+        muted = m is bool && (bool)m;
+        return null;
+    }
+
+    public string SetVolume(int volume)
+    {
+        Dictionary<string, object> r;
+        return Call("ssap://audio/setVolume", new Dictionary<string, object> { { "volume", volume } }, out r);
+    }
+
+    public string SetMute(bool mute)
+    {
+        Dictionary<string, object> r;
+        return Call("ssap://audio/setMute", new Dictionary<string, object> { { "mute", mute } }, out r);
+    }
+
+    // "tv_speaker", "headphone", "external_arc", "external_optical", "bt_soundbar", ...
+    public string GetSoundOutput(out string output)
+    {
+        Dictionary<string, object> r;
+        string err = Call("ssap://audio/getSoundOutput", null, out r);
+        output = err == null ? Json.Get(r, "soundOutput") as string : null;
+        return err;
+    }
+
+    public string SetSoundOutput(string output)
+    {
+        Dictionary<string, object> r;
+        return Call("ssap://audio/changeSoundOutput", new Dictionary<string, object> { { "output", output } }, out r);
+    }
+
     // appId of what's on screen, e.g. "com.webos.app.hdmi2"
     public string ForegroundApp()
     {
@@ -344,10 +387,72 @@ static class SonyAvr
     public static string SetPower(string ip, bool on)
     {
         object r;
-        // The STR-DN1080 (UK model) only accepts "off" ("standby" is refused as Illegal Argument).
-        // That's a deeper standby than the remote's: USB power goes off and the receiver leaves the
-        // network, so it can't be switched back on over the network (Wake-on-LAN doesn't wake it).
+        // The STR-DN1080 only accepts "off" ("standby" is refused as Illegal Argument). Whether it
+        // stays on the network afterwards (so "active" can switch it back on) depends on its Network
+        // Standby and Remote Start settings - see GetPowerSettings / EnableNetworkStart.
         return Call(ip, "system", "setPowerStatus", "1.1", new Dictionary<string, object> { { "status", on ? "active" : "off" } }, out r);
+    }
+
+    // Network Standby ("quickStartMode") and Remote Start ("wolMode"). UK/EU models hide both from
+    // their setup menu, but the API still reads and sets them; with both on, the receiver stays on
+    // the network when switched off and can be switched on over it.
+    public static string GetNetworkStart(string ip, out bool networkStandby, out bool remoteStart)
+    {
+        networkStandby = remoteStart = false;
+        object r;
+        string err = Call(ip, "system", "getPowerSettings", "1.0", new Dictionary<string, object> { { "target", "" } }, out r);
+        if (err != null) return err;
+        var list = r as object[];
+        if (list == null) return "unexpected reply";
+        foreach (object s in list)
+        {
+            bool on = (Json.Get(s, "currentValue") as string) == "on";
+            string target = Json.Get(s, "target") as string;
+            if (target == "quickStartMode") networkStandby = on;
+            else if (target == "wolMode") remoteStart = on;
+        }
+        return null;
+    }
+
+    public static string EnableNetworkStart(string ip)
+    {
+        object r;
+        var settings = new object[]
+        {
+            new Dictionary<string, object> { { "target", "quickStartMode" }, { "value", "on" } },
+            new Dictionary<string, object> { { "target", "wolMode" }, { "value", "on" } }
+        };
+        return Call(ip, "system", "setPowerSettings", "1.0", new Dictionary<string, object> { { "settings", settings } }, out r);
+    }
+
+    // Main zone volume, its range and mute.
+    public static string GetVolume(string ip, out int volume, out int min, out int max, out bool muted)
+    {
+        volume = min = max = 0; muted = false;
+        object r;
+        string err = Call(ip, "audio", "getVolumeInformation", "1.1", new Dictionary<string, object> { { "output", "" } }, out r);
+        if (err != null) return err;
+        var list = r as object[];
+        object zone = list != null && list.Length > 0 ? list[0] : null;
+        if (zone == null) return "no volume in reply";
+        volume = Convert.ToInt32(Json.Get(zone, "volume"));
+        min = Convert.ToInt32(Json.Get(zone, "minVolume") ?? 0);
+        max = Convert.ToInt32(Json.Get(zone, "maxVolume") ?? 100);
+        muted = (Json.Get(zone, "mute") as string) == "on";
+        return null;
+    }
+
+    public static string SetVolume(string ip, int volume)
+    {
+        object r;
+        return Call(ip, "audio", "setAudioVolume", "1.1",
+            new Dictionary<string, object> { { "volume", volume.ToString(System.Globalization.CultureInfo.InvariantCulture) }, { "output", "" } }, out r);
+    }
+
+    public static string SetMute(string ip, bool mute)
+    {
+        object r;
+        return Call(ip, "audio", "setAudioMute", "1.1", new Dictionary<string, object> { { "mute", mute ? "on" : "off" }, { "output", "" } }, out r);
     }
 
     // uri e.g. "extInput:bd-dvd"
@@ -540,9 +645,15 @@ sealed class Tapo
     {
         string user, pass;
         if (!LoadLogin(out user, out pass)) return "no Tapo login saved (Room setup > Subwoofer plug login...)";
-        var t = new Tapo(ip);
-        string err = t.Login(user, pass);
-        return err ?? t.SetOn(on);
+        string err = null;
+        for (int attempt = 0; attempt < 3; attempt++)        // Wi-Fi plugs occasionally miss a request
+        {
+            var t = new Tapo(ip);
+            err = t.Login(user, pass) ?? t.SetOn(on);
+            if (err == null || err.StartsWith("the plug rejected", StringComparison.Ordinal)) return err;
+            Thread.Sleep(1000);
+        }
+        return err;
     }
 }
 

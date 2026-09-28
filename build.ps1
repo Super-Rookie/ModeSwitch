@@ -17,7 +17,7 @@ $winrt = @("$wm\Windows.Media.winmd", "$wm\Windows.Foundation.winmd", "$fw\Syste
 
 $targets = @(
   # Room.cs: TV / receiver / smart plug control (JSON via System.Web.Extensions, login storage via System.Security)
-  @{ Name = 'ModeSwitch'; Kind = 'winexe'; Refs = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.Security.dll') + $winrt; Extra = @('Room.cs') },
+  @{ Name = 'ModeSwitch'; Kind = 'winexe'; Refs = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.Security.dll') + $winrt; Extra = @('Room.cs', 'RoomSound.cs') },
   @{ Name = 'NvProbe';    Kind = 'exe';    Refs = @() },
   @{ Name = 'NvClocks';   Kind = 'exe';    Refs = @() }
 )

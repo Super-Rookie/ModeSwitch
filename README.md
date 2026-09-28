@@ -141,7 +141,7 @@ waking. Each switch logs per-step timings, e.g.
 | Device | Protocol | Notes |
 |---|---|---|
 | LG TV | webOS SSAP: JSON over a websocket, port 3000 (3001 TLS) | Pair once from **Room setup → Pair TV** and accept the prompt on the TV. It's switched on with Wake-on-LAN (`tv.mac`), which needs **General → Mobile TV On → Turn on via Wi-Fi** on the TV. After a long spell off it can take over 30 s to answer. The switch waits 20 s, then carries on and selects the input in the background. |
-| Sony receiver (STR-DN1080) | Sony Audio Control API: JSON-RPC over HTTP, port 10000 | Needs **Network Settings → External Control: On**. It accepts only `setPowerStatus` `off` (`standby` is refused). That puts it in a deep standby that also cuts its USB power and drops it off the network. UK/EU models have no Network Standby / Remote Start setting, and Wake-on-LAN doesn't wake it, so **it can't be switched on over the network**. The Theatre switch asks for the remote and carries on. Its network takes over a minute to come back, so the PC input is selected in the background. Anything powered from its USB port (e.g. an IR extender) needs another USB supply. |
+| Sony receiver (STR-DN1080) | Sony Audio Control API: JSON-RPC over HTTP, port 10000 | Needs **Network Settings → External Control: On**. It accepts only `setPowerStatus` `off` (`standby` is refused). To be switched back on over the network it needs **Network Standby** and **Remote Start**. UK/EU models hide both from their setup menu, but the API still has them (`system/getPowerSettings`: `quickStartMode` and `wolMode`). ModeSwitch turns them on whenever it reaches the receiver. With them on, it stays reachable in standby and comes on in about 2 s. Without them, it drops off the network when off, and Wake-on-LAN doesn't wake it. The Theatre switch then asks for the remote, carries on, and selects the PC input in the background once the receiver's network is back (over a minute). |
 | Sony projector | PJ Talk / SDCP, TCP 53484 | Power item `0x0130` (1 on, 0 off), status `0x0102`. It stays reachable in standby. |
 | TP-Link Tapo plug | KLAP (handshake, then AES-encrypted requests) | Enter the TP-Link account login once from **Room setup → Subwoofer plug login…**. It's stored DPAPI-encrypted in `HKCU\Software\ModeSwitch`, readable only by that Windows user, never in a file. |
 
@@ -244,7 +244,12 @@ anything by itself, so a stray click can't change modes (and GPU scheduling) by 
 - The menu has:
   - Movie mode / 3D Movie mode / Game mode
   - **Play 3D Blu-ray / 3D film…**
-  - **TV room** / **Theatre room**, and **Room setup** (check devices, pair the TV, the Tapo login)
+  - **TV room** / **Theatre room**
+  - **Volume**: sliders for the TV and receiver volume, right in the menu, with a clickable scale
+    in steps of 5 under each. Also mute for both, and the TV's sound output (TV speakers / wired
+    headphones). Levels are read in the background when the submenu opens.
+  - **Room setup**: a **Subwoofer** toggle (ticked while it's on), check devices, pair the TV, the
+    Tapo login
   - **Refresh rate**: a submenu per display, listing every rate at its current resolution
   - **HDR**: current state, with each display listed and ticked if HDR is on; click one to toggle it
   - **Sound**: the current output and format, with the four presets underneath; the active one is ticked
@@ -302,6 +307,7 @@ these files.
 | `room.tv.receiveroff` | `false` = leave the receiver on in the TV room |
 | `tv.ip`, `tv.mac`, `tv.input` | LG TV address, MAC for Wake-on-LAN, and the PC's input (`HDMI_1`) |
 | `avr.ip`, `avr.input`, `avr.inputname` | receiver address, the PC's input (`extInput:bd-dvd`), and its name for messages |
+| `avr.volume.max` | highest receiver volume the menu slider allows (blank = the receiver's own maximum) |
 | `sub.ip` | the subwoofer's Tapo plug |
 | `sound.<room>.<mode>` | sound preset for that mode in that room; `none` = leave sound alone |
 | `display.target` | part of the display's name the resolution keys apply to (blank = primary display) |
@@ -406,6 +412,7 @@ no SDK or Visual Studio is needed. The source avoids C# 6+ syntax for that reaso
 |---|---|
 | `src\ModeSwitch.cs` | the tray app |
 | `src\Room.cs` | TV / receiver / Tapo plug control, and which display Windows uses |
+| `src\RoomSound.cs` | the Volume submenu |
 | `src\NvProbe.cs` | read-only dump of sync-related NVIDIA driver profile settings |
 | `src\NvClocks.cs` | read, or set, GPU pstate clock offsets |
 | `bin\config.ini` | all settings |
