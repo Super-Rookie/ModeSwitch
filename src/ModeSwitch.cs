@@ -1022,6 +1022,7 @@ class ModeSwitchApp : ApplicationContext
         // ModeSwitch.exe --play3d <file>   3D Movie mode, mount (ISO), play, eject, switch back, exit
         if (args.Length >= 2 && args[0].Equals("--play3d", StringComparison.OrdinalIgnoreCase))
         {
+            EnsureNetworkDrives(null);                     // in case this runs elevated and the file is on V:\ etc.
             if (!File.Exists(args[1])) return 2;
             new ModeSwitchApp(true).Play3D(Path.GetFullPath(args[1]));
             return 0;
@@ -1565,12 +1566,51 @@ class ModeSwitchApp : ApplicationContext
     volatile bool playing;
     volatile string playingTitle;
 
+    // ---- network drives ----
+    // Mapped drives belong to the normal (non-admin) logon session; this app runs elevated, so it
+    // doesn't see them. Reconnect the user's persistent mappings (HKCU\Network) in this session -
+    // temporarily, with the user's saved credentials - so V:\ etc. work in the file dialog and paths.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct NETRESOURCE { public int dwScope, dwType, dwDisplayType, dwUsage; public string lpLocalName, lpRemoteName, lpComment, lpProvider; }
+    [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+    static extern int WNetAddConnection2(ref NETRESOURCE nr, string password, string user, int flags);
+
+    static List<string> EnsureNetworkDrives(StringBuilder log)
+    {
+        var shares = new List<string>();
+        try
+        {
+            using (RegistryKey net = Registry.CurrentUser.OpenSubKey("Network"))
+            {
+                if (net == null) return shares;
+                foreach (string letter in net.GetSubKeyNames())
+                {
+                    string remote;
+                    using (RegistryKey k = net.OpenSubKey(letter)) remote = k == null ? null : k.GetValue("RemotePath") as string;
+                    if (string.IsNullOrEmpty(remote) || letter.Length != 1) continue;
+                    shares.Add(remote);
+                    string root = letter.ToUpperInvariant() + ":";
+                    if (Directory.Exists(root + "\\")) continue;              // already visible here
+                    var nr = new NETRESOURCE { dwType = 1, lpLocalName = root, lpRemoteName = remote };   // RESOURCETYPE_DISK
+                    int rc = WNetAddConnection2(ref nr, null, null, 0);        // 0 = temporary, not remembered
+                    if (log != null) log.AppendLine(rc == 0 ? "connected " + root + " (" + remote + ")" : "couldn't connect " + root + " (" + remote + "), error " + rc);
+                }
+            }
+        }
+        catch (Exception ex) { if (log != null) log.AppendLine("network drives: " + ex.Message); }
+        return shares;
+    }
+
     void Play3DFromMenu()
     {
         string file = null;
+        var netLog = new StringBuilder();
+        List<string> shares = EnsureNetworkDrives(netLog);
+        if (netLog.Length > 0) WriteLog("network drives", netLog.ToString().TrimEnd());
         using (var dlg = new OpenFileDialog())
         {
             dlg.Title = "Play in 3D";
+            foreach (string unc in shares) { try { dlg.CustomPlaces.Add(unc); } catch { } }   // fallback shortcuts in the sidebar
             dlg.Filter = "3D Blu-ray ISO or 3D video (*.iso;*.mkv;*.m2ts;*.mp4)|*.iso;*.mkv;*.m2ts;*.mp4|All files (*.*)|*.*";
             string last = ReadReg("Last3DFolder");
             if (!string.IsNullOrEmpty(last) && Directory.Exists(last)) dlg.InitialDirectory = last;
