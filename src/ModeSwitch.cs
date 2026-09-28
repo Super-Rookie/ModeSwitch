@@ -391,6 +391,214 @@ static class Ab
     }
 }
 
+// ---------------------------------------------------------------- sound
+// Presets act on the current default playback device (e.g. the TV or AV receiver over HDMI).
+//  - Spatial presets (Dolby Atmos) use the documented WinRT SpatialAudioDeviceConfiguration API;
+//    Windows then picks the output format itself (e.g. Dolby MAT 2.0 bitstream for Home Theater).
+//  - PCM presets turn spatial sound off, then set the speaker layout and the default format
+//    through the audio policy interface (IPolicyConfig), as Sound Control Panel does.
+static class Snd
+{
+    public class Preset
+    {
+        public string Key, Label, Spatial;   // Spatial = format ID, or null for plain PCM
+        public int Channels, Rate, Bits;
+        public uint Mask;
+    }
+
+    const string SpatialOff = "{00000000-0000-0000-0000-000000000000}";
+
+    public static readonly Preset[] Presets =
+    {
+        new Preset { Key = "atmos-hometheater", Label = "Dolby Atmos for Home Theater", Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHomeTheater },
+        new Preset { Key = "atmos-headphones",  Label = "Dolby Atmos for Headphones",   Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHeadphones },
+        new Preset { Key = "stereo-24-96",      Label = "Stereo 24-bit 96 kHz",         Channels = 2, Rate = 96000, Bits = 24, Mask = 0x3 },
+        new Preset { Key = "7.1-24-96",         Label = "7.1 24-bit 96 kHz",            Channels = 8, Rate = 96000, Bits = 24, Mask = 0x63F },
+    };
+
+    public static Preset Find(string key)
+    {
+        foreach (var p in Presets) if (p.Key.Equals(key.Trim(), StringComparison.OrdinalIgnoreCase)) return p;
+        return null;
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct PKEY { public Guid fmt; public int pid; }
+    [StructLayout(LayoutKind.Explicit, Size = 24)] struct PV { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public uint u4; }
+
+    [ComImport, Guid("f8679f50-850a-41cf-9c72-430f290290c8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPolicyConfig
+    {
+        [PreserveSig] int GetMixFormat([MarshalAs(UnmanagedType.LPWStr)] string id, out IntPtr fmt);
+        [PreserveSig] int GetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string id, [MarshalAs(UnmanagedType.Bool)] bool def, out IntPtr fmt);
+        [PreserveSig] int ResetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string id);
+        [PreserveSig] int SetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string id, IntPtr endpointFmt, IntPtr mixFmt);
+        [PreserveSig] int GetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string id, [MarshalAs(UnmanagedType.Bool)] bool def, out long a, out long b);
+        [PreserveSig] int SetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string id, ref long a);
+        [PreserveSig] int GetShareMode([MarshalAs(UnmanagedType.LPWStr)] string id, out IntPtr m);
+        [PreserveSig] int SetShareMode([MarshalAs(UnmanagedType.LPWStr)] string id, IntPtr m);
+        [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string id, [MarshalAs(UnmanagedType.Bool)] bool fx, ref PKEY k, out PV v);
+        [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string id, [MarshalAs(UnmanagedType.Bool)] bool fx, ref PKEY k, ref PV v);
+    }
+    [ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")] class PolicyConfigClient { }
+
+    // WinRT id "\\?\SWD#MMDEVAPI#{0.0.0.00000000}.{guid}#{...}" -> endpoint id "{0.0.0.00000000}.{guid}"
+    static string EndpointId(string winrtId)
+    {
+        int a = winrtId.IndexOf("MMDEVAPI#", StringComparison.OrdinalIgnoreCase);
+        if (a < 0) return null;
+        a += 9;
+        int b = winrtId.IndexOf('#', a);
+        return b > a ? winrtId.Substring(a, b - a) : winrtId.Substring(a);
+    }
+
+    public static string DeviceName(string endpointId)
+    {
+        try
+        {
+            string guid = endpointId.Substring(endpointId.LastIndexOf('.') + 1);
+            using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\" + guid + @"\Properties"))
+            {
+                object name = k == null ? null : k.GetValue("{a45c254e-df1c-4efd-8020-67d146a850e0},2");
+                return name as string ?? "default output";
+            }
+        }
+        catch { return "default output"; }
+    }
+
+    static bool GetDefault(out string winrtId, out string endpointId)
+    {
+        winrtId = Windows.Media.Devices.MediaDevice.GetDefaultAudioRenderId(Windows.Media.Devices.AudioDeviceRole.Default);
+        endpointId = string.IsNullOrEmpty(winrtId) ? null : EndpointId(winrtId);
+        return endpointId != null;
+    }
+
+    static bool IsOff(string spatial)
+    {
+        return string.IsNullOrEmpty(spatial) || spatial.Equals(SpatialOff, StringComparison.OrdinalIgnoreCase);
+    }
+
+    static string SetSpatial(Windows.Media.Audio.SpatialAudioDeviceConfiguration cfg, string format)
+    {
+        // Wait on the WinRT operation through its own status rather than AsTask(), which needs
+        // the SDK's unified Windows.winmd instead of the per-namespace files Windows ships.
+        var op = cfg.SetDefaultSpatialAudioFormatAsync(format);
+        var info = (Windows.Foundation.IAsyncInfo)op;
+        var sw = Stopwatch.StartNew();
+        while (info.Status == Windows.Foundation.AsyncStatus.Started)
+        {
+            if (sw.ElapsedMilliseconds > 10000) { info.Cancel(); return "timed out"; }
+            System.Threading.Thread.Sleep(20);
+        }
+        if (info.Status != Windows.Foundation.AsyncStatus.Completed)
+            return "failed (" + info.Status + ", 0x" + info.ErrorCode.HResult.ToString("X8") + ")";
+        var r = op.GetResults();
+        return r.Status == Windows.Media.Audio.SetDefaultSpatialAudioFormatStatus.Succeeded ? null : r.Status.ToString();
+    }
+
+    static IntPtr MakeFormat(int ch, int rate, int valid, int container, uint mask, bool isFloat)
+    {
+        IntPtr p = Marshal.AllocCoTaskMem(40);
+        for (int i = 0; i < 40; i++) Marshal.WriteByte(p, i, 0);
+        int block = ch * container / 8;
+        Marshal.WriteInt16(p, 0, unchecked((short)0xFFFE));   // WAVE_FORMAT_EXTENSIBLE
+        Marshal.WriteInt16(p, 2, (short)ch);
+        Marshal.WriteInt32(p, 4, rate);
+        Marshal.WriteInt32(p, 8, rate * block);
+        Marshal.WriteInt16(p, 12, (short)block);
+        Marshal.WriteInt16(p, 14, (short)container);
+        Marshal.WriteInt16(p, 16, 22);
+        Marshal.WriteInt16(p, 18, (short)valid);
+        Marshal.WriteInt32(p, 20, unchecked((int)mask));
+        byte[] sub = new Guid(isFloat ? "00000003-0000-0010-8000-00aa00389b71" : "00000001-0000-0010-8000-00aa00389b71").ToByteArray();
+        Marshal.Copy(sub, 0, p + 24, 16);
+        return p;
+    }
+
+    // Applies a preset to the default playback device. Returns null on success, else a message.
+    public static string Apply(Preset p, out string deviceName)
+    {
+        deviceName = "default output";
+        string winrtId, ep;
+        if (!GetDefault(out winrtId, out ep)) return "no default playback device";
+        deviceName = DeviceName(ep);
+        var cfg = Windows.Media.Audio.SpatialAudioDeviceConfiguration.GetForDeviceId(winrtId);
+
+        if (p.Spatial != null)
+        {
+            if (!cfg.IsSpatialAudioSupported || !cfg.IsSpatialAudioFormatSupported(p.Spatial))
+                return p.Label + " is not available on " + deviceName;
+            string err = SetSpatial(cfg, p.Spatial);
+            return err == null ? null : p.Label + ": " + err;
+        }
+
+        // PCM preset: spatial sound off first, otherwise it owns the output format.
+        if (!IsOff(cfg.DefaultSpatialAudioFormat))
+        {
+            string err = SetSpatial(cfg, SpatialOff);
+            if (err != null) return "turning spatial sound off: " + err;
+        }
+
+        var pc = (IPolicyConfig)new PolicyConfigClient();
+        var key = new PKEY { fmt = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 3 };   // speaker layout
+        var val = new PV { vt = 19, u4 = p.Mask };                                               // VT_UI4
+        int rc = pc.SetPropertyValue(ep, false, ref key, ref val);
+        if (rc != 0) return string.Format("speaker layout rc=0x{0:X}", rc);
+
+        IntPtr devFmt = MakeFormat(p.Channels, p.Rate, p.Bits, 32, p.Mask, false);
+        IntPtr mixFmt = MakeFormat(p.Channels, p.Rate, 32, 32, p.Mask, true);
+        try { rc = pc.SetDeviceFormat(ep, devFmt, mixFmt); }
+        finally { Marshal.FreeCoTaskMem(devFmt); Marshal.FreeCoTaskMem(mixFmt); }
+        if (rc != 0) return string.Format("{0}: format rc=0x{1:X} (not supported by {2}?)", p.Label, rc, deviceName);
+
+        // Confirm by reading the format back.
+        int ch, rate, bits;
+        if (ReadFormat(pc, ep, out ch, out rate, out bits) && (ch != p.Channels || rate != p.Rate || bits != p.Bits))
+            return string.Format("{0} did not take effect (device reports {1}ch {2}-bit {3} Hz)", p.Label, ch, bits, rate);
+        return null;
+    }
+
+    static bool ReadFormat(IPolicyConfig pc, string ep, out int ch, out int rate, out int bits)
+    {
+        ch = rate = bits = 0;
+        IntPtr f;
+        if (pc.GetDeviceFormat(ep, false, out f) != 0 || f == IntPtr.Zero) return false;
+        try
+        {
+            ch = Marshal.ReadInt16(f, 2);
+            rate = Marshal.ReadInt32(f, 4);
+            bits = Marshal.ReadInt16(f, 16) >= 22 ? Marshal.ReadInt16(f, 18) : Marshal.ReadInt16(f, 14);
+            return true;
+        }
+        finally { Marshal.FreeCoTaskMem(f); }
+    }
+
+    // Describes the default device's current state, and which preset (if any) it matches.
+    public static string Current(out Preset match, out string deviceName)
+    {
+        match = null;
+        deviceName = "default output";
+        string winrtId, ep;
+        if (!GetDefault(out winrtId, out ep)) return "no playback device";
+        deviceName = DeviceName(ep);
+
+        var cfg = Windows.Media.Audio.SpatialAudioDeviceConfiguration.GetForDeviceId(winrtId);
+        string spatial = cfg.DefaultSpatialAudioFormat;
+        if (!IsOff(spatial))
+        {
+            foreach (var p in Presets)
+                if (p.Spatial != null && p.Spatial.Equals(spatial, StringComparison.OrdinalIgnoreCase)) { match = p; return p.Label; }
+            return "spatial sound " + spatial;
+        }
+
+        int ch, rate, bits;
+        if (!ReadFormat((IPolicyConfig)new PolicyConfigClient(), ep, out ch, out rate, out bits)) return "unknown format";
+        foreach (var p in Presets)
+            if (p.Spatial == null && p.Channels == ch && p.Rate == rate && p.Bits == bits) { match = p; return p.Label; }
+        string layout = ch == 2 ? "Stereo" : ch == 6 ? "5.1" : ch == 8 ? "7.1" : ch + "ch";
+        return string.Format("{0} {1}-bit {2} kHz", layout, bits, rate / 1000.0);
+    }
+}
+
 // ---------------------------------------------------------------- display
 static class Disp
 {
@@ -593,6 +801,15 @@ class ModeSwitchApp : ApplicationContext
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
+        // ModeSwitch.exe --sound <preset>   applies a sound preset and exits; the result goes to the log
+        if (args.Length >= 2 && args[0].Equals("--sound", StringComparison.OrdinalIgnoreCase))
+        {
+            var app = new ModeSwitchApp(true);
+            string result = ApplySound(args[1]);
+            app.WriteLog("sound " + args[1], result);
+            return result.IndexOf("FAILED", StringComparison.Ordinal) >= 0 || result.StartsWith("Sound: unknown") ? 1 : 0;
+        }
+
         // ModeSwitch.exe --apply movie|game   applies a mode and exits (used by the uninstaller)
         if (args.Length >= 2 && args[0].Equals("--apply", StringComparison.OrdinalIgnoreCase))
         {
@@ -713,6 +930,26 @@ class ModeSwitchApp : ApplicationContext
         });
     }
 
+    // Applies a sound preset and returns a log/notification line.
+    static string ApplySound(string key)
+    {
+        var preset = Snd.Find(key);
+        if (preset == null) return "Sound: unknown preset '" + key + "' (see config.ini)";
+        try
+        {
+            string device;
+            string err = null;
+            for (int attempt = 0; attempt < 3; attempt++)   // the HDMI audio device can be mid-reset
+            {
+                err = Snd.Apply(preset, out device);
+                if (err == null) return string.Format("Sound: {0} on {1}", preset.Label, device);
+                System.Threading.Thread.Sleep(1500);
+            }
+            return "Sound FAILED: " + err;
+        }
+        catch (Exception ex) { return "Sound FAILED: " + ex.Message; }
+    }
+
     static string DescribeVerification(List<KeyValuePair<uint, uint>> settings)
     {
         string err;
@@ -819,6 +1056,7 @@ class ModeSwitchApp : ApplicationContext
         }
         if (hdr.DropDownItems.Count == 0) hdr.Enabled = false;
         menu.Items.Add(hdr);
+        menu.Items.Add(BuildSoundMenu());
         menu.Items.Add(new ToolStripSeparator());
 
         if (rebootPending) menu.Items.Add(new ToolStripMenuItem("Reboot now", null, (s, e) => Reboot()));
@@ -829,6 +1067,39 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open config.ini", null, (s, e) => Process.Start("notepad.exe", cfg.Path)));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (s, e) => { tray.Visible = false; Application.Exit(); }));
+    }
+
+    // "Sound: <current>" with the presets underneath, for the current default playback device.
+    ToolStripMenuItem BuildSoundMenu()
+    {
+        Snd.Preset current = null;
+        string device = "default output", state;
+        try { state = Snd.Current(out current, out device); }
+        catch (Exception ex) { state = "unavailable (" + ex.Message + ")"; }
+
+        var item = new ToolStripMenuItem("Sound: " + state);
+        var output = new ToolStripMenuItem("Output: " + device);
+        output.Enabled = false;
+        item.DropDownItems.Add(output);
+        item.DropDownItems.Add(new ToolStripSeparator());
+        foreach (var p in Snd.Presets)
+        {
+            Snd.Preset preset = p;
+            var mi = new ToolStripMenuItem(p.Label, null, (s, e) =>
+            {
+                // Runs in the background: setting a format can take a second or two.
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string text = ApplySound(preset.Key);
+                    WriteLog("sound " + preset.Key, text);
+                    try { syncCtl.BeginInvoke((MethodInvoker)delegate { Notify(text, text.IndexOf("FAILED", StringComparison.Ordinal) >= 0); }); }
+                    catch { }
+                });
+            });
+            mi.Checked = current != null && current.Key == p.Key;
+            item.DropDownItems.Add(mi);
+        }
+        return item;
     }
 
     // ---- switching ----
@@ -923,6 +1194,11 @@ class ModeSwitchApp : ApplicationContext
         if (herr != null) log.AppendLine(herr);
         foreach (var t in Disp.Targets())                 // report what the display actually reports
             if (t.HdrCapable) log.AppendLine(string.Format("HDR on {0}: {1}", t.Name, t.HdrOn ? "on" : "off"));
+
+        // 3b. Sound preset. After HDR, because an HDR change re-negotiates the HDMI link, which can
+        //     briefly reset the TV/receiver audio device.
+        string soundKey = cfg.Get("sound." + p, "");
+        if (soundKey.Length > 0) log.AppendLine(ApplySound(soundKey));
 
         // 4. Afterburner / RTSS
         foreach (string procName in cfg.Get("apps." + p + ".stop", "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))

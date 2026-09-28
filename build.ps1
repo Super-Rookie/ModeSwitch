@@ -9,8 +9,14 @@ $src = Join-Path $PSScriptRoot 'src'
 $bin = Join-Path $PSScriptRoot 'bin'
 if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Path $bin | Out-Null }
 
+# The sound presets use the WinRT spatial-audio API. Its metadata (.winmd) ships with every
+# Windows 10/11 install, and the WinRT interop assemblies ship with .NET Framework 4.8.
+$fw = Split-Path $csc
+$wm = Join-Path $env:WINDIR 'System32\WinMetadata'
+$winrt = @("$wm\Windows.Media.winmd", "$wm\Windows.Foundation.winmd", "$fw\System.Runtime.WindowsRuntime.dll", "$fw\System.Runtime.dll")
+
 $targets = @(
-  @{ Name = 'ModeSwitch'; Kind = 'winexe'; Refs = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll') },
+  @{ Name = 'ModeSwitch'; Kind = 'winexe'; Refs = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll') + $winrt },
   @{ Name = 'NvProbe';    Kind = 'exe';    Refs = @() },
   @{ Name = 'NvClocks';   Kind = 'exe';    Refs = @() }
 )

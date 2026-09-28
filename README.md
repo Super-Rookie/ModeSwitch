@@ -22,8 +22,35 @@ video playback. Instead of changing half a dozen settings by hand every time, th
 | Windows HDR (every HDR-capable display) | off | on |
 | GPU voltage/frequency curve | Afterburner `Profile2` (stock) | Afterburner `Profile1` (undervolt) |
 | Afterburner + RTSS | closed | running |
+| Sound preset (optional) | `sound.movie` | `sound.game` |
 
 Every value is set in `bin\config.ini`, so the presets can be changed without rebuilding.
+
+## Sound presets
+
+Four presets, applied to the **current default playback device** (e.g. the TV or AV receiver
+over HDMI). Pick one from the tray menu at any time, or set `sound.movie` / `sound.game` to apply
+one automatically when switching modes.
+
+| Preset key | What it sets |
+|---|---|
+| `atmos-hometheater` | Spatial sound: Dolby Atmos for Home Theater. Windows bitstreams Dolby MAT 2.0 over HDMI and chooses the output format itself |
+| `atmos-headphones` | Spatial sound: Dolby Atmos for Headphones (binaural stereo) |
+| `stereo-24-96` | Spatial sound off, 2 speakers, 24-bit 96 kHz |
+| `7.1-24-96` | Spatial sound off, 7.1 speakers, 24-bit 96 kHz |
+
+- The Atmos presets use Windows' documented spatial-audio API and need the **Dolby Access** app
+  (free from the Microsoft Store) to have been set up once.
+- The PCM presets turn spatial sound off first, since spatial sound controls the output format
+  while it's active. Then they set the speaker layout and default format, the same settings as
+  *Sound Control Panel → Configure* and *Properties → Advanced*, and read the format back to confirm.
+- Atmos for Home Theater can't run at 96 kHz: it carries Atmos inside a fixed HDMI bitstream
+  format. That's why it and the 24/96 PCM presets are separate choices.
+- If the device can't do a format (for example 7.1 on a stereo-only output), the notification says
+  so and nothing is changed.
+
+`ModeSwitch.exe --sound <preset>` applies a preset from the command line (e.g. a shortcut) and
+exits. The result is written to the log.
 
 HAGS only changes after a reboot. After a switch, ModeSwitch waits until every other setting is
 applied, then shows a dialog summarising what changed and asks whether to reboot now.
@@ -83,6 +110,7 @@ deletes the folder.
   - Movie mode / Game mode
   - **Refresh rate**: a submenu per display, listing every rate at its current resolution
   - **HDR**: current state, with each display listed and ticked if HDR is on; click one to toggle it
+  - **Sound**: the current output and format, with the four presets underneath; the active one is ticked
   - Reboot now (only while a reboot is pending)
   - **NVIDIA Control Panel** and **Windows display settings**, opened as your normal user (not elevated)
   - Open config.ini
@@ -111,6 +139,7 @@ Afterburner curve and Windows HDR do not survive a reboot on their own.
 | `ab.<mode>.stopafter` | close Afterburner once the profile is applied |
 | `oc.<mode>.clearoffsets` | reset flat pstate clock offsets to 0 (separate from the curve) |
 | `apps.<mode>.stop`, `apps.<mode>.start` | extra processes to close / a program to start (`path|args`) |
+| `sound.movie`, `sound.game` | sound preset applied when switching to that mode (blank = leave audio alone) |
 | `log.maxkb` | log size limit before it rotates to `ModeSwitch.old.log` |
 | `open.nvcp`, `open.display` | what the menu shortcuts open: NVIDIA Control Panel's Store app ID, and a `ms-settings:` page |
 
