@@ -403,7 +403,8 @@ static class Snd
     {
         public string Key, Label, Spatial;   // Spatial = format ID, or null for plain PCM
         public int Channels, Rate, Bits;
-        public uint Mask;
+        public uint Mask;                    // speaker layout (Configure speakers)
+        public uint FullRange;               // speakers marked full-range (same wizard, second page)
     }
 
     const string SpatialOff = "{00000000-0000-0000-0000-000000000000}";
@@ -412,8 +413,10 @@ static class Snd
     {
         new Preset { Key = "atmos-hometheater", Label = "Dolby Atmos for Home Theater", Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHomeTheater },
         new Preset { Key = "atmos-headphones",  Label = "Dolby Atmos for Headphones",   Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHeadphones },
-        new Preset { Key = "stereo-24-96",      Label = "Stereo 24-bit 96 kHz",         Channels = 2, Rate = 96000, Bits = 24, Mask = 0x3 },
-        new Preset { Key = "7.1-24-96",         Label = "7.1 24-bit 96 kHz",            Channels = 8, Rate = 96000, Bits = 24, Mask = 0x63F },
+        // FullRange: front L/R (0x3); 7.1 adds back L/R (0x30) and side L/R (0x600).
+        // Centre and LFE aren't offered as full-range by Windows' speaker setup.
+        new Preset { Key = "stereo-24-96",      Label = "Stereo 24-bit 96 kHz",         Channels = 2, Rate = 96000, Bits = 24, Mask = 0x3,   FullRange = 0x3 },
+        new Preset { Key = "7.1-24-96",         Label = "7.1 24-bit 96 kHz",            Channels = 8, Rate = 96000, Bits = 24, Mask = 0x63F, FullRange = 0x633 },
     };
 
     public static Preset Find(string key)
@@ -543,6 +546,11 @@ static class Snd
         var val = new PV { vt = 19, u4 = p.Mask };                                               // VT_UI4
         int rc = pc.SetPropertyValue(ep, false, ref key, ref val);
         if (rc != 0) return string.Format("speaker layout rc=0x{0:X}", rc);
+
+        var fullKey = new PKEY { fmt = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 6 };   // full-range speakers
+        var fullVal = new PV { vt = 19, u4 = p.FullRange };
+        rc = pc.SetPropertyValue(ep, false, ref fullKey, ref fullVal);
+        if (rc != 0) return string.Format("full-range speakers rc=0x{0:X}", rc);
 
         IntPtr devFmt = MakeFormat(p.Channels, p.Rate, p.Bits, 32, p.Mask, false);
         IntPtr mixFmt = MakeFormat(p.Channels, p.Rate, 32, 32, p.Mask, true);

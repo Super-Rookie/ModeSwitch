@@ -36,14 +36,16 @@ one automatically when switching modes.
 |---|---|
 | `atmos-hometheater` | Spatial sound: Dolby Atmos for Home Theater. Windows bitstreams Dolby MAT 2.0 over HDMI and chooses the output format itself |
 | `atmos-headphones` | Spatial sound: Dolby Atmos for Headphones (binaural stereo) |
-| `stereo-24-96` | Spatial sound off, 2 speakers, 24-bit 96 kHz |
-| `7.1-24-96` | Spatial sound off, 7.1 speakers, 24-bit 96 kHz |
+| `stereo-24-96` | Spatial sound off, 2 speakers (both full-range), 24-bit 96 kHz |
+| `7.1-24-96` | Spatial sound off, 7.1 speakers (front, back and side pairs full-range), 24-bit 96 kHz |
 
 - The Atmos presets use Windows' documented spatial-audio API and need the **Dolby Access** app
   (free from the Microsoft Store) to have been set up once.
 - The PCM presets turn spatial sound off first, since spatial sound controls the output format
-  while it's active. Then they set the speaker layout and default format, the same settings as
-  *Sound Control Panel → Configure* and *Properties → Advanced*, and read the format back to confirm.
+  while it's active. Then they set the speaker layout, the full-range speakers and the default
+  format, the same settings as *Sound Control Panel → Configure* and *Properties → Advanced*, and
+  read the format back to confirm. Windows' speaker setup doesn't offer centre or subwoofer as
+  full-range, so those are left as they are.
 - Atmos for Home Theater can't run at 96 kHz: it carries Atmos inside a fixed HDMI bitstream
   format. That's why it and the 24/96 PCM presets are separate choices.
 - If the device can't do a format (for example 7.1 on a stereo-only output), the notification says
