@@ -9,6 +9,7 @@ video playback. Instead of changing half a dozen settings by hand every time, th
 | Tray icon | Meaning |
 |---|---|
 | Blue film | Movie mode |
+| Purple "3D" | 3D Movie mode (Movie settings plus 1080p for the projector; see below) |
 | Green gamepad | Game mode |
 | Amber | switching, or a reboot is still needed |
 
@@ -25,6 +26,38 @@ video playback. Instead of changing half a dozen settings by hand every time, th
 | Sound preset (optional) | `sound.movie` | `sound.game` |
 
 Every value is set in `bin\config.ini`, so the presets can be changed without rebuilding.
+
+## 3D Movie mode
+
+A third mode, chosen from the right-click menu (left-click still toggles Movie ↔ Game). It shows a
+purple **3D** icon.
+
+3D Movie inherits **every Movie setting**: GPU scheduling, G-SYNC, HDR, Afterburner, sound. It
+only overrides what it sets itself, so switching between Movie and 3D Movie never needs a reboot.
+Out of the box it adds:
+
+- **Projector to 1920×1080 @ 23 Hz** (`display.3d`). Projectors generally take frame-compatible 3D
+  only at 1080p. Movie mode sets it back to 3840×2160 @ 23 Hz (`display.movie`). Both only act
+  when the display named by `display.target` is connected, so nothing changes while you're on a TV.
+- **A reminder** (`reminder.3d`) to set the projector's 3D format with its remote.
+
+Any Movie key can be given a `.3d` version to differ, e.g. `sound.3d = atmos-hometheater`.
+
+### 3D playback notes
+
+Current NVIDIA drivers no longer output frame-packed stereo 3D: stereo support was dropped
+after driver 425.31, and DirectX 11 stereo is gone on RTX 30-series and newer. On such a card:
+
+- **MVC files** (3D Blu-ray rips): set madVR → *devices → your projector → properties → 3D format*
+  to **top-and-bottom** (or side-by-side). madVR then packs both eyes into a normal 2D frame, and
+  the projector's 3D processing splits them. With **auto**, madVR tries frame packing, which needs
+  driver support. Worth a test on your hardware, but expect flat 2D on RTX 30-series and newer.
+- **Files already side-by-side / top-and-bottom** play as normal video; just set the projector to
+  the matching format.
+- For full-resolution frame-packed 3D, a standalone 3D-capable player is the dependable route.
+
+The madVR 3D format only applies to MVC content, so it can stay set permanently without affecting
+2D playback.
 
 ## Sound presets
 
@@ -144,6 +177,10 @@ Afterburner curve and Windows HDR do not survive a reboot on their own.
 | `oc.<mode>.clearoffsets` | reset flat pstate clock offsets to 0 (separate from the curve) |
 | `apps.<mode>.stop`, `apps.<mode>.start` | extra processes to close / a program to start (`path|args`) |
 | `sound.movie`, `sound.game` | sound preset applied when switching to that mode (blank = leave audio alone) |
+| `display.target` | part of the display's name the resolution keys apply to (blank = primary display) |
+| `display.<mode>` | resolution and refresh for that mode, e.g. `1920x1080@23`; skipped if the display isn't connected |
+| `reminder.<mode>` | a line added to that mode's notification, for things the app can't do itself |
+| `<key>.3d` | any Movie key with `.3d` instead of `.movie`, to make 3D Movie differ from Movie |
 | `log.maxkb` | log size limit before it rotates to `ModeSwitch.old.log` |
 | `open.nvcp`, `open.display` | what the menu shortcuts open: NVIDIA Control Panel's Store app ID, and a `ms-settings:` page |
 
@@ -247,7 +284,7 @@ no SDK or Visual Studio is needed. The source avoids C# 6+ syntax for that reaso
 | `install.ps1` | installer / uninstaller |
 | `build.ps1` | builds everything into `bin\` |
 
-`ModeSwitch.exe --apply movie|game` applies a mode without the tray icon and exits. The uninstaller
+`ModeSwitch.exe --apply movie|3d|game` applies a mode without the tray icon and exits. The uninstaller
 uses it.
 
 ## Caveats

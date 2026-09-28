@@ -79,6 +79,23 @@ class Config
         return list;
     }
 
+    // Gives `mode` every `baseMode` setting it doesn't define itself, e.g. "hdr.movie" -> "hdr.3d",
+    // "ab.movie.profile" -> "ab.3d.profile". Keys the mode sets explicitly win.
+    public void Inherit(string mode, string baseMode)
+    {
+        var add = new List<KeyValuePair<string, string>>();
+        string seg = "." + baseMode;
+        foreach (var kv in map)
+        {
+            string k = kv.Key, nk = null;
+            int i = k.IndexOf(seg + ".", StringComparison.OrdinalIgnoreCase);
+            if (i >= 0) nk = k.Substring(0, i) + "." + mode + k.Substring(i + seg.Length);
+            else if (k.EndsWith(seg, StringComparison.OrdinalIgnoreCase)) nk = k.Substring(0, k.Length - seg.Length) + "." + mode;
+            if (nk != null && !map.ContainsKey(nk)) add.Add(new KeyValuePair<string, string>(nk, kv.Value));
+        }
+        foreach (var kv in add) map[kv.Key] = kv.Value;
+    }
+
     static bool ParseU32(string s, out uint v)
     {
         s = s.Trim();
@@ -791,6 +808,57 @@ static class Disp
         return list;
     }
 
+    // ---- resolution per display (3D Movie mode needs the projector at 1080p) ----
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct SNAME { public HDRHDR h; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string gdi; }
+    [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")] static extern int GetSourceName(ref SNAME r);
+
+    // GDI device name (e.g. \\.\DISPLAY1) of the active display whose monitor name contains `nameContains`;
+    // an empty `nameContains` means the primary display. Also returns the monitor's name.
+    public static string FindDisplay(string nameContains, out string monitorName)
+    {
+        monitorName = null;
+        uint pc, mc;
+        if (GetDisplayConfigBufferSizes(2, out pc, out mc) != 0) return null;
+        var ps = new PATH[pc]; var ms = new MODE[mc];
+        if (QueryDisplayConfig(2, ref pc, ps, ref mc, ms, IntPtr.Zero) != 0) return null;
+        for (int i = 0; i < pc; i++)
+        {
+            var n = new TNAME(); n.h.type = 2; n.h.size = Marshal.SizeOf(typeof(TNAME)); n.h.a = ps[i].t.a; n.h.id = ps[i].t.id;
+            GetName(ref n);
+            var s = new SNAME(); s.h.type = 1; s.h.size = Marshal.SizeOf(typeof(SNAME)); s.h.a = ps[i].s.a; s.h.id = ps[i].s.id;
+            if (GetSourceName(ref s) != 0) continue;
+            bool match = string.IsNullOrEmpty(nameContains)
+                ? System.Windows.Forms.Screen.PrimaryScreen.DeviceName.Equals(s.gdi, StringComparison.OrdinalIgnoreCase)
+                : (n.name ?? "").IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) >= 0;
+            if (match) { monitorName = (n.name ?? "").Trim(); return s.gdi; }
+        }
+        return null;
+    }
+
+    // Sets resolution and refresh together. Returns null on success, else a message.
+    public static string SetMode(string device, int width, int height, int hz)
+    {
+        bool available = false;
+        for (int m = 0; ; m++)
+        {
+            var dm = new DEVMODE(); dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+            if (!EnumDisplaySettings(device, m, ref dm)) break;
+            if (dm.dmPelsWidth == width && dm.dmPelsHeight == height && dm.dmDisplayFrequency == hz) { available = true; break; }
+        }
+        if (!available) return string.Format("{0}x{1} @ {2} Hz is not offered by this display", width, height, hz);
+
+        var cur = new DEVMODE(); cur.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        if (!EnumDisplaySettings(device, -1, ref cur)) return "cannot read current mode";
+        if (cur.dmPelsWidth == width && cur.dmPelsHeight == height && cur.dmDisplayFrequency == hz) return null;   // already there
+        cur.dmPelsWidth = width;
+        cur.dmPelsHeight = height;
+        cur.dmDisplayFrequency = hz;
+        cur.dmFields = 0x80000 | 0x100000 | 0x400000;          // DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
+        int rc = ChangeDisplaySettingsEx(device, ref cur, IntPtr.Zero, 0x00000001, IntPtr.Zero);   // CDS_UPDATEREGISTRY
+        return rc == 0 ? null : "ChangeDisplaySettingsEx rc=" + rc;
+    }
+
     public static string SetRefresh(string device, int hz)
     {
         var dm = new DEVMODE(); dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
@@ -838,7 +906,7 @@ class ModeSwitchApp : ApplicationContext
         // ModeSwitch.exe --apply movie|game   applies a mode and exits (used by the uninstaller)
         if (args.Length >= 2 && args[0].Equals("--apply", StringComparison.OrdinalIgnoreCase))
         {
-            string target = args[1].Equals("game", StringComparison.OrdinalIgnoreCase) ? "game" : "movie";
+            string target = ParseMode(args[1]);
             var headlessApp = new ModeSwitchApp(true);
             headlessApp.Switch(target);
             return 0;
@@ -855,6 +923,7 @@ class ModeSwitchApp : ApplicationContext
         this.headless = headless;
         exeDir = Path.GetDirectoryName(Application.ExecutablePath);
         cfg = new Config(Path.Combine(exeDir, "config.ini"));
+        cfg.Inherit("3d", "movie");            // 3D Movie = Movie plus its own overrides (e.g. display.3d)
         mode = ReadStoredMode();
         if (headless) return;
         syncCtl = new Control();
@@ -884,12 +953,22 @@ class ModeSwitchApp : ApplicationContext
                 if (k != null)
                 {
                     object v = k.GetValue("Mode");
-                    if (v != null && (string)v == "game") return "game";
-                    if (v != null) return "movie";
+                    if (v != null) return ParseMode((string)v);
                 }
         }
         catch { }
         return HagsValue() == 2 ? "game" : "movie";
+    }
+
+    static string ParseMode(string s)
+    {
+        s = (s ?? "").Trim().ToLowerInvariant();
+        return s == "game" ? "game" : s == "3d" ? "3d" : "movie";
+    }
+
+    static string ModeName(string m)
+    {
+        return m == "game" ? "Game" : m == "3d" ? "3D Movie" : "Movie";
     }
 
     void StoreMode()
@@ -971,6 +1050,7 @@ class ModeSwitchApp : ApplicationContext
                 || l.IndexOf("did not take effect", StringComparison.Ordinal) >= 0 || l.IndexOf("exited", StringComparison.Ordinal) >= 0)
             { problems.Add(l); continue; }
             if (l.StartsWith("stopped ") || l.StartsWith("Run bin\\")) continue;
+            if (l.EndsWith("not connected - resolution unchanged")) continue;   // normal while on the TV
 
             Match m;
             if ((m = Regex.Match(l, @"^NVIDIA driver changed: (.+)$")).Success) lines.Add("Driver updated: " + m.Groups[1].Value);
@@ -989,6 +1069,26 @@ class ModeSwitchApp : ApplicationContext
         if (at >= 0) lines[at] = "HDR: " + string.Join(", ", hdr.ToArray());
         problems.AddRange(lines);
         return string.Join("\n", problems.ToArray());
+    }
+
+    // "1920x1080@23" on the display named by display.target (blank = primary). Returns a log line.
+    static string ApplyResolution(string spec, string target)
+    {
+        var m = Regex.Match(spec, @"^\s*(\d+)\s*x\s*(\d+)\s*@\s*(\d+)\s*$");
+        if (!m.Success) return "Display: can't read '" + spec + "' (expected e.g. 1920x1080@23)";
+        int w = int.Parse(m.Groups[1].Value), h = int.Parse(m.Groups[2].Value), hz = int.Parse(m.Groups[3].Value);
+        try
+        {
+            string name;
+            string dev = Disp.FindDisplay(target, out name);
+            if (dev == null)
+                return string.Format("Display: {0} not connected - resolution unchanged", target.Length > 0 ? target : "primary display");
+            string err = Disp.SetMode(dev, w, h, hz);
+            if (err != null) return "Display FAILED: " + name + ": " + err;
+            System.Threading.Thread.Sleep(2500);             // let the HDMI link settle before HDR/sound
+            return string.Format("Display: {0} {1}x{2} @ {3} Hz", name, w, h, hz);
+        }
+        catch (Exception ex) { return "Display FAILED: " + ex.Message; }
     }
 
     // Applies a sound preset and returns a log/notification line.
@@ -1050,8 +1150,8 @@ class ModeSwitchApp : ApplicationContext
     void FillMenu(ContextMenuStrip menu)
     {
         string headerText = busy && pendingTarget != null
-            ? "Switching to " + (pendingTarget == "game" ? "Game" : "Movie") + "..."
-            : string.Format("Mode: {0}{1}", mode == "game" ? "Game" : "Movie", rebootPending ? "  (reboot pending)" : "");
+            ? "Switching to " + ModeName(pendingTarget) + "..."
+            : string.Format("Mode: {0}{1}", ModeName(mode), rebootPending ? "  (reboot pending)" : "");
         var header = new ToolStripMenuItem(headerText);
         header.Enabled = false;
         menu.Items.Add(header);
@@ -1063,7 +1163,11 @@ class ModeSwitchApp : ApplicationContext
         var game = new ToolStripMenuItem("Game mode", null, (s, e) => Switch("game"));
         game.Checked = mode == "game";
         game.Enabled = !busy;
+        var movie3d = new ToolStripMenuItem("3D Movie mode", null, (s, e) => Switch("3d"));
+        movie3d.Checked = mode == "3d";
+        movie3d.Enabled = !busy;
         menu.Items.Add(movie);
+        menu.Items.Add(movie3d);
         menu.Items.Add(game);
         menu.Items.Add(new ToolStripSeparator());
 
@@ -1173,7 +1277,7 @@ class ModeSwitchApp : ApplicationContext
         busy = true;
         pendingTarget = target;
         UpdateIcon();
-        Notify("Switching to " + (target == "game" ? "Game" : "Movie") + " mode...", false);
+        Notify("Switching to " + ModeName(target) + " mode...", false);
 
         System.Threading.ThreadPool.QueueUserWorkItem(delegate
         {
@@ -1198,7 +1302,7 @@ class ModeSwitchApp : ApplicationContext
                     {
                         var answer = MessageBox.Show(
                             string.Format("{0} mode applied:\n\n{1}\n\nGPU scheduling only changes after a reboot.\n\nReboot now?",
-                                target == "game" ? "Game" : "Movie", text),
+                                ModeName(target), text),
                             "ModeSwitch", MessageBoxButtons.YesNo, problem ? MessageBoxIcon.Warning : MessageBoxIcon.Question);
                         if (answer == DialogResult.Yes) Reboot();
                     }
@@ -1213,7 +1317,7 @@ class ModeSwitchApp : ApplicationContext
     {
         var log = new StringBuilder();
         bool isGame = target == "game";
-        string p = isGame ? "game" : "movie";
+        string p = ParseMode(target);
 
         string note = driverNote;
         if (note != null) { log.AppendLine(note); driverNote = null; }
@@ -1249,6 +1353,11 @@ class ModeSwitchApp : ApplicationContext
             if (cerr != null) log.AppendLine("clock offsets: " + cerr);
         }
 
+        // 2b. Display resolution/refresh (e.g. 3D Movie: projector to 1080p, Movie: back to 4K).
+        //     Before HDR and sound, since a mode change re-negotiates the HDMI link.
+        string res = cfg.Get("display." + p, "");
+        if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+
         // 3. HDR
         bool hdrWanted = cfg.GetBool("hdr." + p, isGame);
         string herr = Disp.SetHdr(hdrWanted);
@@ -1260,6 +1369,10 @@ class ModeSwitchApp : ApplicationContext
         //     briefly reset the TV/receiver audio device.
         string soundKey = cfg.Get("sound." + p, "");
         if (soundKey.Length > 0) log.AppendLine(ApplySound(soundKey));
+
+        // 3c. Anything the app can't do itself, e.g. the projector's 3D format for frame-compatible 3D.
+        string reminder = cfg.Get("reminder." + p, "");
+        if (reminder.Length > 0) log.AppendLine(reminder);
 
         // 4. Afterburner / RTSS
         foreach (string procName in cfg.Get("apps." + p + ".stop", "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
@@ -1339,15 +1452,16 @@ class ModeSwitchApp : ApplicationContext
         if (busy && pendingTarget != null)
         {
             tray.Icon = MakeIcon("", Color.FromArgb(255, 186, 8));   // sync glyph, amber
-            tray.Text = "ModeSwitch - switching to " + (pendingTarget == "game" ? "Game" : "Movie") + "...";
+            tray.Text = "ModeSwitch - switching to " + ModeName(pendingTarget) + "...";
             return;
         }
         string glyph = mode == "game" ? "" : "";           // gamepad / video
         Color colour = rebootPending ? Color.FromArgb(255, 186, 8)
                      : mode == "game" ? Color.FromArgb(118, 219, 92)
+                     : mode == "3d"   ? Color.FromArgb(200, 140, 255)
                                       : Color.FromArgb(120, 180, 255);
-        tray.Icon = MakeIcon(glyph, colour);
-        tray.Text = string.Format("ModeSwitch - {0} mode{1}", mode == "game" ? "Game" : "Movie", rebootPending ? " (reboot pending)" : "");
+        tray.Icon = mode == "3d" ? MakeTextIcon("3D", colour) : MakeIcon(glyph, colour);
+        tray.Text = string.Format("ModeSwitch - {0} mode{1}", ModeName(mode), rebootPending ? " (reboot pending)" : "");
     }
 
     static Icon MakeIcon(string glyph, Color colour)
@@ -1362,6 +1476,26 @@ class ModeSwitchApp : ApplicationContext
                 using (var brush = new SolidBrush(colour))
                 using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     g.DrawString(glyph, font, brush, new RectangleF(0, 0, 32, 32), fmt);
+            }
+            IntPtr h = bmp.GetHicon();
+            using (Icon tmp = Icon.FromHandle(h))
+                return (Icon)tmp.Clone();
+        }
+    }
+
+    // Plain-text icon, used for 3D Movie mode ("3D" reads better than any glyph at tray size).
+    static Icon MakeTextIcon(string text, Color colour)
+    {
+        using (var bmp = new Bitmap(32, 32))
+        {
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                using (var font = new Font("Segoe UI", 17f, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var brush = new SolidBrush(colour))
+                using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                    g.DrawString(text, font, brush, new RectangleF(-2, 0, 36, 32), fmt);
             }
             IntPtr h = bmp.GetHicon();
             using (Icon tmp = Icon.FromHandle(h))
@@ -1399,7 +1533,7 @@ class ModeSwitchApp : ApplicationContext
     void Notify(string text, bool warn)
     {
         if (string.IsNullOrEmpty(text)) return;
-        tray.BalloonTipTitle = "ModeSwitch - " + (mode == "game" ? "Game" : "Movie") + " mode";
+        tray.BalloonTipTitle = "ModeSwitch - " + ModeName(mode) + " mode";
         tray.BalloonTipText = text.Length > 250 ? text.Substring(0, 250) : text;
         tray.BalloonTipIcon = warn ? ToolTipIcon.Warning : ToolTipIcon.Info;
         tray.ShowBalloonTip(4000);
