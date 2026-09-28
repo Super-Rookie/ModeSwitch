@@ -1410,18 +1410,35 @@ class ModeSwitchApp : ApplicationContext
         return framePacking ? 0 : 2;
     }
 
-    // "1920x1080@23" on the display named by display.target (blank = primary). Returns a log line.
+    // The mode's resolution for the room in use: display.<room>.<mode> on that room's display (e.g.
+    // display.tv.game = @120), else display.<mode> on display.target. Returns a log line, or null.
+    string ApplyModeResolution(string p)
+    {
+        string spec = cfg.Get("display." + room + "." + p, "");
+        if (spec.Length > 0) return ApplyResolution(spec, RoomDisplays(room)[0]);
+        spec = cfg.Get("display." + p, "");
+        return spec.Length > 0 ? ApplyResolution(spec, cfg.Get("display.target", "")) : null;
+    }
+
+    // "1920x1080@23", or "@120" to change only the refresh rate, on the display whose name contains
+    // `target` (blank = primary). Returns a log line.
     static string ApplyResolution(string spec, string target)
     {
-        var m = Regex.Match(spec, @"^\s*(\d+)\s*x\s*(\d+)\s*@\s*(\d+)\s*$");
-        if (!m.Success) return "Display: can't read '" + spec + "' (expected e.g. 1920x1080@23)";
-        int w = int.Parse(m.Groups[1].Value), h = int.Parse(m.Groups[2].Value), hz = int.Parse(m.Groups[3].Value);
+        var m = Regex.Match(spec, @"^\s*(?:(\d+)\s*x\s*(\d+))?\s*@\s*(\d+)\s*$");
+        if (!m.Success) return "Display: can't read '" + spec + "' (expected e.g. 1920x1080@23 or @120)";
+        int hz = int.Parse(m.Groups[3].Value), w = 0, h = 0;
         try
         {
             string name;
             string dev = Disp.FindDisplay(target, out name);
             if (dev == null)
                 return string.Format("Display: {0} not connected - resolution unchanged", target.Length > 0 ? target : "primary display");
+            if (m.Groups[1].Success) { w = int.Parse(m.Groups[1].Value); h = int.Parse(m.Groups[2].Value); }
+            else
+            {
+                foreach (var scr in Disp.Screens()) if (scr.Device == dev) { w = scr.W; h = scr.H; }   // keep the resolution
+                if (w == 0) return "Display FAILED: " + name + ": can't read its current resolution";
+            }
             string err = Disp.SetMode(dev, w, h, hz);
             if (err != null) return "Display FAILED: " + name + ": " + err;
             System.Threading.Thread.Sleep(2500);             // let the HDMI link settle before HDR/sound
@@ -1528,15 +1545,17 @@ class ModeSwitchApp : ApplicationContext
         var game = new ToolStripMenuItem("Game mode", null, (s, e) => Switch("game"));
         game.Checked = mode == "game";
         game.Enabled = !busy;
-        var movie3d = new ToolStripMenuItem("3D Movie mode", null, (s, e) => Switch("3d"));
+        // 3D only works on the projector, so the 3D items are greyed out outside the Theatre room.
+        bool theatre = room == "theatre";
+        var movie3d = new ToolStripMenuItem(theatre ? "3D Movie mode" : "3D Movie mode (Theatre room only)", null, (s, e) => Switch("3d"));
         movie3d.Checked = mode == "3d";
-        movie3d.Enabled = !busy;
+        movie3d.Enabled = !busy && theatre;
         menu.Items.Add(movie);
         menu.Items.Add(movie3d);
         menu.Items.Add(game);
         string nowPlaying = playingTitle;
         var play3d = new ToolStripMenuItem(nowPlaying != null ? "Playing in 3D: " + nowPlaying : "Play 3D Blu-ray / 3D film...", null, (s, e) => Play3DFromMenu());
-        play3d.Enabled = !busy && !playing;
+        play3d.Enabled = !busy && !playing && theatre;
         menu.Items.Add(play3d);
         menu.Items.Add(new ToolStripSeparator());
 
@@ -2049,8 +2068,8 @@ class ModeSwitchApp : ApplicationContext
 
         // 2c. Display resolution/refresh (e.g. 3D Movie: projector to 1080p, Movie: back to 4K).
         //     Before HDR and sound, since a mode change re-negotiates the HDMI link.
-        string res = cfg.Get("display." + p, "");
-        if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+        string resLine = ApplyModeResolution(p);
+        if (resLine != null) log.AppendLine(resLine);
 
         // 2d. ...and entering 3D only works once the 1080p signal is there, so retry after the change.
         if (pjItems.Count > 0 && !pjOk) pjLine = ApplyProjector(pjItems, true, out pjOk);
@@ -2355,10 +2374,17 @@ class ModeSwitchApp : ApplicationContext
         room = target;
         WriteReg("Room", room);
 
+        // 3D only works on the projector: leaving the Theatre room in 3D Movie mode goes back to Movie.
+        if (!theatre && mode == "3d")
+        {
+            DoSwitch("movie", true);
+            log.AppendLine("3D Movie isn't available in the TV room - switched to Movie");
+        }
+
         // 4. The current mode's resolution, HDR and sound for the display now in use.
         string p = ParseMode(mode);
-        string res = cfg.Get("display." + p, "");
-        if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+        string resLine = ApplyModeResolution(p);
+        if (resLine != null) log.AppendLine(resLine);
         string herr = Disp.SetHdr(cfg.GetBool("hdr." + p, p == "game"));
         if (herr != null) log.AppendLine(herr);
         ApplyGpuColour(p, log);
@@ -2647,8 +2673,8 @@ class ModeSwitchApp : ApplicationContext
                 if (active.Count == 1 && active[0].IndexOf(first, StringComparison.OrdinalIgnoreCase) >= 0) return;   // already right
                 log.AppendLine(ShowRoomDisplay(wanted, 0));
                 log.AppendLine(SetRoomAudio(cfg.Get("room." + target + ".audio", target == "theatre" ? "SONY AVSYSTEM" : "LG TV")));
-                string res = cfg.Get("display." + p, "");
-                if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+                string resLine = ApplyModeResolution(p);
+                if (resLine != null) log.AppendLine(resLine);
                 ApplyGpuColour(p, log);
                 string soundLine = ApplyRoomSound(p);
                 if (soundLine != null) log.AppendLine(soundLine);

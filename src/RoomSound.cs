@@ -58,15 +58,15 @@ sealed class RoomSoundMenu
         items.Add(SliderRow(out tvSlider, out tvValue, 0, 100));
         tvMute = new ToolStripMenuItem("Mute TV", null, (s, e) => { bool m = !tvMuted; Run(() => { if (TvCall(t => t.SetMute(m), "mute")) tvMuted = m; }); });
         items.Add(tvMute);
-        var output = new ToolStripMenuItem("TV sound output");
+        // Output choices listed right here under a heading, not in a submenu of their own.
+        items.Add(Header("TV sound output:"));
         tvOutputs = new ToolStripMenuItem[Outputs.GetLength(0)];
         for (int i = 0; i < tvOutputs.Length; i++)
         {
             string id = Outputs[i, 0];
             tvOutputs[i] = new ToolStripMenuItem(Outputs[i, 1], null, (s, e) => Run(() => TvCall(t => t.SetSoundOutput(id), "output")));
-            output.DropDownItems.Add(tvOutputs[i]);
+            items.Add(tvOutputs[i]);
         }
-        items.Add(output);
         items.Add(new ToolStripSeparator());
 
         avrHeader = Header("Receiver: reading...");
@@ -289,8 +289,12 @@ sealed class RoomSoundMenu
     {
         string ip = avrIp();
         if (ip.Length == 0) return;
-        int vol, min, max; bool muted;
-        string err = SonyAvr.GetVolume(ip, out vol, out min, out max, out muted);
+        // With Network Standby on it still answers (volume included) while off, so check its power.
+        bool on;
+        string perr = SonyAvr.GetPower(ip, out on);
+        if (perr == null && !on) { Ui(() => SetAvr(false, "Receiver: standby")); return; }
+        int vol = 0, min = 0, max = 0; bool muted = false;
+        string err = perr ?? SonyAvr.GetVolume(ip, out vol, out min, out max, out muted);
         Ui(() =>
         {
             if (avrHeader == null) return;

@@ -126,8 +126,13 @@ place and a projector, AV receiver and subwoofer in another:
 | Windows default sound device | the TV | the receiver |
 
 After the devices, the current mode's resolution, HDR and sound preset are applied for the display
-now in use, with `sound.<room>.<mode>` (e.g. `sound.tv.movie`) overriding `sound.<mode>`. **Play
-3D…** switches to the Theatre room first. Also `ModeSwitch.exe --room tv|theatre`.
+now in use, with `sound.<room>.<mode>` (e.g. `sound.tv.movie`) overriding `sound.<mode>`, and
+`display.<room>.<mode>` overriding `display.<mode>` (Game on the TV runs at 120 Hz:
+`display.tv.game = @120`). Also `ModeSwitch.exe --room tv|theatre`.
+
+3D only works on the projector. In the TV room, **3D Movie mode** and **Play 3D…** are greyed
+out in the menu. Switching to the TV room while in 3D Movie mode goes back to Movie.
+(`--play3d` from the command line still switches to the Theatre room first.)
 
 Order matters for comfort and speed:
 - The projector is switched on first, because it takes longest to warm up.
@@ -343,7 +348,9 @@ anything by itself, so a stray click can't change modes (and GPU scheduling) by 
   - **TV room** / **Theatre room**
   - **Volume**: sliders for the TV and receiver volume, right in the menu, with a clickable scale
     in steps of 5 under each. Also mute for both, and the TV's sound output (TV speakers / wired
-    headphones). Levels are read in the background when the submenu opens.
+    headphones), listed directly under a heading. Levels are read in the background when the
+    submenu opens. The receiver's controls are greyed out while it's in standby: with Network
+    Standby on, it still answers, so its power is checked first.
   - **Room setup**: a **Subwoofer** toggle (ticked while it's on), check devices, pair the TV, the
     Tapo login
   - **Refresh rate**: a submenu per display, listing every rate at its current resolution
@@ -409,6 +416,7 @@ these files.
 | `sound.<room>.<mode>` | sound preset for that mode in that room; `none` = leave sound alone |
 | `display.target` | part of the display's name the resolution keys apply to (blank = primary display) |
 | `display.<mode>` | resolution and refresh for that mode, e.g. `1920x1080@23`; skipped if the display isn't connected |
+| `display.<room>.<mode>` | the same for one room, on that room's display, winning over `display.<mode>`; `@120` changes only the refresh rate (e.g. `display.tv.game = @120`) |
 | `reminder.<mode>` | a line added to that mode's notification, for things the app can't do itself |
 | `<key>.3d` | any Movie key with `.3d` instead of `.movie`, to make 3D Movie differ from Movie |
 | `log.maxkb` | log size limit before it rotates to `ModeSwitch.old.log` |
