@@ -10,6 +10,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -954,6 +955,42 @@ class ModeSwitchApp : ApplicationContext
         });
     }
 
+    // Condenses a switch log into a notification. Windows cuts balloon text at ~255 characters,
+    // so each step becomes one short line, problems go first (never the part that gets cut),
+    // and routine lines (processes stopped) are left to the log.
+    static string Summarize(string log)
+    {
+        var problems = new List<string>();
+        var lines = new List<string>();
+        var hdr = new List<string>();
+        foreach (string raw in log.Split('\n'))
+        {
+            string l = raw.Trim();
+            if (l.Length == 0) continue;
+            if (l.IndexOf("FAILED", StringComparison.Ordinal) >= 0 || l.IndexOf("rc=", StringComparison.Ordinal) >= 0
+                || l.IndexOf("did not take effect", StringComparison.Ordinal) >= 0 || l.IndexOf("exited", StringComparison.Ordinal) >= 0)
+            { problems.Add(l); continue; }
+            if (l.StartsWith("stopped ") || l.StartsWith("Run bin\\")) continue;
+
+            Match m;
+            if ((m = Regex.Match(l, @"^NVIDIA driver changed: (.+)$")).Success) lines.Add("Driver updated: " + m.Groups[1].Value);
+            else if ((m = Regex.Match(l, @"^NVIDIA settings applied and verified \(driver (.+)\)$")).Success) lines.Add("NVIDIA settings verified (" + m.Groups[1].Value + ")");
+            else if ((m = Regex.Match(l, @"^Afterburner: (\S+) applied(.*?)(, then closed)?$")).Success) lines.Add("Afterburner: " + m.Groups[1].Value + m.Groups[2].Value);
+            else if ((m = Regex.Match(l, @"^HDR on (.+): (on|off)$")).Success)
+            {
+                if (hdr.Count == 0) lines.Add("\0HDR");          // placeholder keeps HDR in its place
+                hdr.Add(m.Groups[2].Value + " (" + m.Groups[1].Value + ")");
+            }
+            else if ((m = Regex.Match(l, @"^Sound: (.+) on (.+)$")).Success) lines.Add("Sound: " + m.Groups[1].Value.Replace("Dolby Atmos for ", "Atmos "));
+            else if (l.StartsWith("GPU scheduling: ")) lines.Add(l.Replace(" after reboot", " (after reboot)"));
+            else lines.Add(l);
+        }
+        int at = lines.IndexOf("\0HDR");
+        if (at >= 0) lines[at] = "HDR: " + string.Join(", ", hdr.ToArray());
+        problems.AddRange(lines);
+        return string.Join("\n", problems.ToArray());
+    }
+
     // Applies a sound preset and returns a log/notification line.
     static string ApplySound(string key)
     {
@@ -1165,7 +1202,7 @@ class ModeSwitchApp : ApplicationContext
                             "ModeSwitch", MessageBoxButtons.YesNo, problem ? MessageBoxIcon.Warning : MessageBoxIcon.Question);
                         if (answer == DialogResult.Yes) Reboot();
                     }
-                    else Notify(text, problem);
+                    else Notify(Summarize(text), problem);
                 });
             }
             catch { busy = false; }

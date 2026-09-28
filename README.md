@@ -207,6 +207,17 @@ about twice the limit is ever on disk.
 
 Overrides only appear when they change something, e.g. `Afterburner: Profile1 applied (memory +1500 MHz)`.
 
+The notification after a switch is a condensed version, one short line per step, because Windows
+cuts notification text at about 255 characters. Failures are listed first so they're never the part
+that gets cut, and routine lines such as processes being stopped stay in the log only:
+
+```
+NVIDIA settings verified (616.64)
+Afterburner: Profile1
+HDR: on (LG TV)
+Sound: Atmos Home Theater
+```
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
