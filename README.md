@@ -63,8 +63,11 @@ of a VPL-VW760ES:
   and hard to use. **Play 3D…** switches it to 3D when the film starts, picking Side-by-Side for
   names containing `SBS`/`HSBS` and Over-Under otherwise (ISOs/MVC, `OU`, `TAB`). It switches back
   to 2D when the film ends.
-- The **Projector** submenu shows the current state and switches 2D / 3D Over-Under / 3D
-  Side-by-Side by hand, or opens the projector's web page.
+- The **Projector** submenu shows the current state and preset (e.g. "Projector: 2D (Auto),
+  User"). It switches 2D / 3D Over-Under / 3D Side-by-Side by hand. Under a **Picture preset** heading
+  it lists all 9 presets directly, with the current one ticked; a click switches to it. In 3D the
+  heading reads "Picture preset (3D)", because the projector keeps a separate 3D preset. There's also **Picture settings…**
+  (the Settings window) and a link to the projector's web page.
 - Everything is skipped quietly when the projector is off or unreachable.
 - Each change is read back to confirm.
 

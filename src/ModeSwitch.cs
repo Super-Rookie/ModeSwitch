@@ -1635,23 +1635,27 @@ class ModeSwitchApp : ApplicationContext
         string ip = cfg.Get("projector.ip", ""), com = cfg.Get("projector.community", "SONY");
         if (ip.Length == 0) return null;
 
-        int power = -1, ds = -1, fmt = -1;
+        int power = -1, ds = -1, fmt = -1, preset = -1;
+        bool in3D = false;
         string err = null;
         try
         {
             err = Pj.Get(ip, com, Pj.ItemPower, out power);
             if (err == null && power == 3)
             {
-                int code;
+                int code, depth;
                 string e = Pj.Get(ip, com, Pj.ItemDisplaySelect, out ds, out code);
                 if (e != null && code == Pj.ErrNotAvailable) ds = -2;          // 4K signal: 3D settings greyed out
                 else if (e != null) err = e;
                 else err = Pj.Get(ip, com, Pj.ItemFormat3D, out fmt);
+                if (Pj.Get(ip, com, PjPicture.Preset, out preset) != null) preset = -1;
+                in3D = Pj.Get(ip, com, PjPicture.Depth3D, out depth) == null;     // only answers while showing 3D
             }
         }
         catch (Exception ex) { err = ex.Message; }
 
         string state = err != null ? "not reachable" : power != 3 ? "standby" : ds == -2 ? "2D (3D needs 1080p)" : Pj.Describe(ds, fmt);
+        if (err == null && power == 3 && preset >= 0) state += ", " + PjPicture.PresetName(preset);
         var item = new ToolStripMenuItem("Projector: " + state);
         bool on = err == null && power == 3;
 
@@ -1678,6 +1682,32 @@ class ModeSwitchApp : ApplicationContext
             mi.Enabled = on;
             item.DropDownItems.Add(mi);
         }
+
+        // Picture presets, listed right here under a heading. The projector keeps a separate preset
+        // for 3D, so in 3D these pick the 3D one.
+        item.DropDownItems.Add(new ToolStripSeparator());
+        var heading = new ToolStripMenuItem(in3D ? "Picture preset (3D):" : "Picture preset:");
+        heading.Enabled = false;
+        item.DropDownItems.Add(heading);
+        for (int i = 0; i < PjPicture.Presets.Length; i++)
+        {
+            int value = i;
+            bool threeD = in3D;
+            var pi = new ToolStripMenuItem(PjPicture.Presets[i], null, (s, e) =>
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    bool ok;
+                    string line = ApplyProjector(new List<KeyValuePair<uint, uint>> { new KeyValuePair<uint, uint>(PjPicture.Preset, (uint)value) }, true, out ok)
+                                  ?? "Projector: not configured";
+                    WriteLog("projector preset " + PjPicture.Presets[value], line);
+                    Say(ok ? "Projector picture: " + PjPicture.Presets[value] + (threeD ? " (3D)" : "") : line, !ok);
+                }));
+            pi.Checked = i == preset;
+            pi.Enabled = on;
+            item.DropDownItems.Add(pi);
+        }
+        item.DropDownItems.Add(new ToolStripMenuItem("Picture settings...", null, (s, e) => ShowSettings()));
+
         item.DropDownItems.Add(new ToolStripSeparator());
         item.DropDownItems.Add(new ToolStripMenuItem("Open projector web page", null, (s, e) => OpenAsUser("http://" + ip + "/")));
         return item;
@@ -2875,36 +2905,45 @@ class ModeSwitchApp : ApplicationContext
 
     static Icon MakeIcon(string glyph, Color colour)
     {
-        using (var bmp = new Bitmap(32, 32))
-        {
-            using (Graphics g = Graphics.FromImage(bmp))
-            {
-                g.Clear(Color.Transparent);
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                using (var font = new Font("Segoe MDL2 Assets", 20f, FontStyle.Regular, GraphicsUnit.Pixel))
-                using (var brush = new SolidBrush(colour))
-                using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString(glyph, font, brush, new RectangleF(0, 0, 32, 32), fmt);
-            }
-            IntPtr h = bmp.GetHicon();
-            using (Icon tmp = Icon.FromHandle(h))
-                return (Icon)tmp.Clone();
-        }
+        return RenderIcon(glyph, "Segoe MDL2 Assets", FontStyle.Regular, colour, 2.2f);
     }
 
     // Plain-text icon, used for 3D Movie mode ("3D" reads better than any glyph at tray size).
     static Icon MakeTextIcon(string text, Color colour)
     {
+        return RenderIcon(text, "Segoe UI Black", FontStyle.Regular, colour, 1.2f);
+    }
+
+    // Draws `text` as a shape scaled to fill the 32x32 icon (keeping its proportions), then fills
+    // it and traces its outline `stroke` pixels wide in the same colour, which thickens thin
+    // glyph strokes so the icon stays bold when Windows shrinks it to tray size.
+    static Icon RenderIcon(string text, string family, FontStyle style, Color colour, float stroke)
+    {
         using (var bmp = new Bitmap(32, 32))
         {
             using (Graphics g = Graphics.FromImage(bmp))
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
             {
                 g.Clear(Color.Transparent);
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                using (var font = new Font("Segoe UI", 17f, FontStyle.Bold, GraphicsUnit.Pixel))
-                using (var brush = new SolidBrush(colour))
-                using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString(text, font, brush, new RectangleF(-2, 0, 36, 32), fmt);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var ff = new FontFamily(family))
+                    path.AddString(text, ff, (int)style, 100f, PointF.Empty, StringFormat.GenericTypographic);
+                RectangleF b = path.GetBounds();
+                if (b.Width > 0 && b.Height > 0)
+                {
+                    float box = 32 - 1 - stroke;                    // room for the outline at the edges
+                    float scale = Math.Min(box / b.Width, box / b.Height);
+                    using (var m = new System.Drawing.Drawing2D.Matrix())
+                    {
+                        m.Translate(16, 16);
+                        m.Scale(scale, scale);
+                        m.Translate(-(b.X + b.Width / 2), -(b.Y + b.Height / 2));
+                        path.Transform(m);
+                    }
+                }
+                using (var brush = new SolidBrush(colour)) g.FillPath(brush, path);
+                using (var pen = new Pen(colour, stroke) { LineJoin = System.Drawing.Drawing2D.LineJoin.Round })
+                    g.DrawPath(pen, path);
             }
             IntPtr h = bmp.GetHicon();
             using (Icon tmp = Icon.FromHandle(h))
