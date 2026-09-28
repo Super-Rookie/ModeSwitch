@@ -34,17 +34,19 @@ one automatically when switching modes.
 
 | Preset key | What it sets |
 |---|---|
-| `atmos-hometheater` | Spatial sound: Dolby Atmos for Home Theater. Windows bitstreams Dolby MAT 2.0 over HDMI and chooses the output format itself |
-| `atmos-headphones` | Spatial sound: Dolby Atmos for Headphones (binaural stereo) |
+| `atmos-hometheater` | 7.1 speakers (front, back and side pairs full-range), then Dolby Atmos for Home Theater. Windows bitstreams Dolby MAT 2.0 over HDMI and chooses the output format itself |
+| `atmos-headphones` | 2 speakers (both full-range), 24-bit 96 kHz, then Dolby Atmos for Headphones, which renders binaural stereo |
 | `stereo-24-96` | Spatial sound off, 2 speakers (both full-range), 24-bit 96 kHz |
 | `7.1-24-96` | Spatial sound off, 7.1 speakers (front, back and side pairs full-range), 24-bit 96 kHz |
 
 - The Atmos presets use Windows' documented spatial-audio API and need the **Dolby Access** app
   (free from the Microsoft Store) to have been set up once.
-- The PCM presets turn spatial sound off first, since spatial sound controls the output format
-  while it's active. Then they set the speaker layout, the full-range speakers and the default
-  format, the same settings as *Sound Control Panel → Configure* and *Properties → Advanced*, and
-  read the format back to confirm. Windows' speaker setup doesn't offer centre or subwoofer as
+- Every preset runs in the same order. It turns spatial sound off, since spatial sound controls the
+  output format while it's active. It sets the speaker layout and full-range speakers, and the
+  default format where the preset has one: the same settings as *Sound Control Panel → Configure*
+  and *Properties → Advanced*. Then it switches the preset's spatial format on, if any. Each step is
+  read back to confirm. The layout always matches the preset, so an Atmos preset never inherits a
+  layout left behind by another one. Windows' speaker setup doesn't offer centre or subwoofer as
   full-range, so those are left as they are.
 - Atmos for Home Theater can't run at 96 kHz: it carries Atmos inside a fixed HDMI bitstream
   format. That's why it and the 24/96 PCM presets are separate choices.

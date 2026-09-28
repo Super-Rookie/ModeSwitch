@@ -401,8 +401,8 @@ static class Snd
 {
     public class Preset
     {
-        public string Key, Label, Spatial;   // Spatial = format ID, or null for plain PCM
-        public int Channels, Rate, Bits;
+        public string Key, Label, Spatial;   // Spatial = format ID, or null for spatial sound off
+        public int Channels, Rate, Bits;     // 0 = leave the format to Windows (Atmos Home Theater)
         public uint Mask;                    // speaker layout (Configure speakers)
         public uint FullRange;               // speakers marked full-range (same wizard, second page)
     }
@@ -411,8 +411,10 @@ static class Snd
 
     public static readonly Preset[] Presets =
     {
-        new Preset { Key = "atmos-hometheater", Label = "Dolby Atmos for Home Theater", Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHomeTheater },
-        new Preset { Key = "atmos-headphones",  Label = "Dolby Atmos for Headphones",   Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHeadphones },
+        // Home Theater bitstreams Atmos to a 7.1 receiver/TV, so the layout is 7.1; Windows picks the
+        // HDMI format itself. Headphones renders binaural stereo, so the device is set up as stereo.
+        new Preset { Key = "atmos-hometheater", Label = "Dolby Atmos for Home Theater", Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHomeTheater, Mask = 0x63F, FullRange = 0x633 },
+        new Preset { Key = "atmos-headphones",  Label = "Dolby Atmos for Headphones",   Spatial = Windows.Media.Audio.SpatialAudioFormatSubtype.DolbyAtmosForHeadphones, Channels = 2, Rate = 96000, Bits = 24, Mask = 0x3, FullRange = 0x3 },
         // FullRange: front L/R (0x3); 7.1 adds back L/R (0x30) and side L/R (0x600).
         // Centre and LFE aren't offered as full-range by Windows' speaker setup.
         new Preset { Key = "stereo-24-96",      Label = "Stereo 24-bit 96 kHz",         Channels = 2, Rate = 96000, Bits = 24, Mask = 0x3,   FullRange = 0x3 },
@@ -526,15 +528,10 @@ static class Snd
         deviceName = DeviceName(ep);
         var cfg = Windows.Media.Audio.SpatialAudioDeviceConfiguration.GetForDeviceId(winrtId);
 
-        if (p.Spatial != null)
-        {
-            if (!cfg.IsSpatialAudioSupported || !cfg.IsSpatialAudioFormatSupported(p.Spatial))
-                return p.Label + " is not available on " + deviceName;
-            string err = SetSpatial(cfg, p.Spatial);
-            return err == null ? null : p.Label + ": " + err;
-        }
+        if (p.Spatial != null && (!cfg.IsSpatialAudioSupported || !cfg.IsSpatialAudioFormatSupported(p.Spatial)))
+            return p.Label + " is not available on " + deviceName;
 
-        // PCM preset: spatial sound off first, otherwise it owns the output format.
+        // 1. Spatial sound off first: while it's on, it owns the output format.
         if (!IsOff(cfg.DefaultSpatialAudioFormat))
         {
             string err = SetSpatial(cfg, SpatialOff);
@@ -542,26 +539,45 @@ static class Snd
         }
 
         var pc = (IPolicyConfig)new PolicyConfigClient();
-        var key = new PKEY { fmt = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 3 };   // speaker layout
-        var val = new PV { vt = 19, u4 = p.Mask };                                               // VT_UI4
-        int rc = pc.SetPropertyValue(ep, false, ref key, ref val);
-        if (rc != 0) return string.Format("speaker layout rc=0x{0:X}", rc);
+        int rc;
 
-        var fullKey = new PKEY { fmt = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 6 };   // full-range speakers
-        var fullVal = new PV { vt = 19, u4 = p.FullRange };
-        rc = pc.SetPropertyValue(ep, false, ref fullKey, ref fullVal);
-        if (rc != 0) return string.Format("full-range speakers rc=0x{0:X}", rc);
+        // 2. Speaker layout and full-range speakers (Configure speakers wizard).
+        if (p.Mask != 0)
+        {
+            var key = new PKEY { fmt = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 3 };      // speaker layout
+            var val = new PV { vt = 19, u4 = p.Mask };                                                  // VT_UI4
+            rc = pc.SetPropertyValue(ep, false, ref key, ref val);
+            if (rc != 0) return string.Format("speaker layout rc=0x{0:X}", rc);
 
-        IntPtr devFmt = MakeFormat(p.Channels, p.Rate, p.Bits, 32, p.Mask, false);
-        IntPtr mixFmt = MakeFormat(p.Channels, p.Rate, 32, 32, p.Mask, true);
-        try { rc = pc.SetDeviceFormat(ep, devFmt, mixFmt); }
-        finally { Marshal.FreeCoTaskMem(devFmt); Marshal.FreeCoTaskMem(mixFmt); }
-        if (rc != 0) return string.Format("{0}: format rc=0x{1:X} (not supported by {2}?)", p.Label, rc, deviceName);
+            var fullKey = new PKEY { fmt = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 6 };  // full-range speakers
+            var fullVal = new PV { vt = 19, u4 = p.FullRange };
+            rc = pc.SetPropertyValue(ep, false, ref fullKey, ref fullVal);
+            if (rc != 0) return string.Format("full-range speakers rc=0x{0:X}", rc);
+        }
 
-        // Confirm by reading the format back.
-        int ch, rate, bits;
-        if (ReadFormat(pc, ep, out ch, out rate, out bits) && (ch != p.Channels || rate != p.Rate || bits != p.Bits))
-            return string.Format("{0} did not take effect (device reports {1}ch {2}-bit {3} Hz)", p.Label, ch, bits, rate);
+        // 3. Default format, read back to confirm. Skipped for Atmos Home Theater, where Windows
+        //    chooses the HDMI bitstream format itself.
+        if (p.Channels != 0)
+        {
+            IntPtr devFmt = MakeFormat(p.Channels, p.Rate, p.Bits, 32, p.Mask, false);
+            IntPtr mixFmt = MakeFormat(p.Channels, p.Rate, 32, 32, p.Mask, true);
+            try { rc = pc.SetDeviceFormat(ep, devFmt, mixFmt); }
+            finally { Marshal.FreeCoTaskMem(devFmt); Marshal.FreeCoTaskMem(mixFmt); }
+            if (rc != 0) return string.Format("{0}: format rc=0x{1:X} (not supported by {2}?)", p.Label, rc, deviceName);
+
+            int ch, rate, bits;
+            if (ReadFormat(pc, ep, out ch, out rate, out bits) && (ch != p.Channels || rate != p.Rate || bits != p.Bits))
+                return string.Format("{0} did not take effect (device reports {1}ch {2}-bit {3} Hz)", p.Label, ch, bits, rate);
+        }
+
+        // 4. Spatial format last, on top of the layout/format set above.
+        if (p.Spatial != null)
+        {
+            string err = SetSpatial(cfg, p.Spatial);
+            if (err != null) return p.Label + ": " + err;
+            if (!p.Spatial.Equals(cfg.DefaultSpatialAudioFormat, StringComparison.OrdinalIgnoreCase))
+                return p.Label + " did not take effect";
+        }
         return null;
     }
 
