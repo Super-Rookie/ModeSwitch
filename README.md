@@ -39,9 +39,51 @@ Out of the box it adds:
 - **Projector to 1920×1080 @ 23 Hz** (`display.3d`). Projectors generally take frame-compatible 3D
   only at 1080p. Movie mode sets it back to 3840×2160 @ 23 Hz (`display.movie`). Both only act
   when the display named by `display.target` is connected, so nothing changes while you're on a TV.
-- **A reminder** (`reminder.3d`) to set the projector's 3D format with its remote.
+- **A reminder** (`reminder.3d`) to set the projector's 3D format with its remote, or, with network
+  control, a note on how the projector gets switched to 3D (`reminder.3d.networked`).
 
 Any Movie key can be given a `.3d` version to differ, e.g. `sound.3d = atmos-hometheater`.
+
+### Projector network control (Sony PJ Talk / SDCP)
+
+With `projector.ip` set, ModeSwitch talks to the projector over the network (TCP 53484). The 3D
+item numbers were found by reading every setting before and after changing them on the remote
+of a VPL-VW760ES:
+
+| Item | Setting | Values |
+|---|---|---|
+| `0x0060` | 2D-3D display select | 0 = Auto, 1 = 3D |
+| `0x0061` | 3D format | 1 = Side-by-Side, 2 = Over-Under |
+
+- The projector's 3D settings only exist while it receives a 1080p (or lower) signal. They are
+  refused (error `0x0180`) at 4K. So leaving 3D sets the projector to 2D *before* switching back
+  to 4K, and entering 3D switches it *after* the change to 1080p. At 4K, 2D is reported as
+  "3D isn't available at this resolution", which is correct rather than an error.
+- **3D Movie mode leaves the projector in 2D**, because a desktop shown in 3D Over-Under is split
+  and hard to use. **Play 3D…** switches it to 3D when the film starts, picking Side-by-Side for
+  names containing `SBS`/`HSBS` and Over-Under otherwise (ISOs/MVC, `OU`, `TAB`). It switches back
+  to 2D when the film ends.
+- The **Projector** submenu shows the current state and switches 2D / 3D Over-Under / 3D
+  Side-by-Side by hand, or opens the projector's web page.
+- Everything is skipped quietly when the projector is off or unreachable.
+- Each change is read back to confirm.
+
+### Play 3D Blu-ray / 3D film…
+
+One menu click (or `ModeSwitch.exe --play3d "<file>"`) that:
+
+1. asks for a 3D Blu-ray **ISO** or a 3D video file (remembering the last folder);
+2. switches to 3D Movie mode;
+3. mounts the ISO and opens its `BDMV\index.bdmv`, so both eyes are read; opening the `.m2ts`
+   directly would give only one eye (2D);
+4. starts the player fullscreen (whatever `.mkv` files open with, or `play3d.player`) and shows the
+   3D-format reminder;
+5. when the player closes, ejects the ISO and switches back to the previous mode.
+
+The ISO is mounted only while ModeSwitch holds it open, so Windows ejects it automatically even
+if something goes wrong. If MPC-HC hands the film to an already-open window, ModeSwitch waits for
+that window instead. Started from Game mode, it leaves GPU scheduling alone both ways, so it
+never needs a reboot.
 
 ### 3D playback notes
 
@@ -90,7 +132,9 @@ one automatically when switching modes.
 exits. The result is written to the log.
 
 HAGS only changes after a reboot. After a switch, ModeSwitch waits until every other setting is
-applied, then shows a dialog summarising what changed and asks whether to reboot now.
+applied, then shows a dialog summarising what changed and asks whether to reboot now. It compares
+against the value HAGS had when Windows started, so switching Game → Movie without rebooting in
+between correctly needs no reboot.
 
 ## Requirements
 
@@ -177,6 +221,9 @@ Afterburner curve and Windows HDR do not survive a reboot on their own.
 | `oc.<mode>.clearoffsets` | reset flat pstate clock offsets to 0 (separate from the curve) |
 | `apps.<mode>.stop`, `apps.<mode>.start` | extra processes to close / a program to start (`path|args`) |
 | `sound.movie`, `sound.game` | sound preset applied when switching to that mode (blank = leave audio alone) |
+| `projector.ip`, `projector.community` | projector address and PJ Talk community (default `SONY`) |
+| `projector.<mode>` | projector items to set per mode, as `item:value` pairs (e.g. `0x0060:0`) |
+| `play3d.player`, `play3d.args` | player for Play 3D… (blank = whatever `.mkv` opens with) and its arguments |
 | `display.target` | part of the display's name the resolution keys apply to (blank = primary display) |
 | `display.<mode>` | resolution and refresh for that mode, e.g. `1920x1080@23`; skipped if the display isn't connected |
 | `reminder.<mode>` | a line added to that mode's notification, for things the app can't do itself |

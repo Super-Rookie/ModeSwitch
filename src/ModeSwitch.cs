@@ -641,6 +641,122 @@ static class Snd
     }
 }
 
+// ---------------------------------------------------------------- projector (Sony PJ Talk / SDCP)
+// SDCP over TCP 53484: version 0x02, category 0x0A, 4-byte community, request (0x00 set / 0x01 get),
+// 16-bit item number, data length, data. The reply repeats the header with 0x01 = OK in byte 6.
+// Item numbers for 3D were found by reading every setting before/after changing them on the
+// remote (VPL-VW760ES): 0x0060 = 2D-3D display select, 0x0061 = 3D format.
+static class Pj
+{
+    public const int ItemPower = 0x0102, ItemDisplaySelect = 0x0060, ItemFormat3D = 0x0061;
+    // Error codes seen in NG replies (last two data bytes): 0x0180 = not available in the current
+    // state (e.g. 3D settings while a 4K signal is shown), 0x0101 = no such item.
+    public const int ErrNotAvailable = 0x0180;
+
+    public static string Request(string ip, string community, bool set, int item, int value, out int result)
+    {
+        int code;
+        return Request(ip, community, set, item, value, out result, out code);
+    }
+
+    public static string Request(string ip, string community, bool set, int item, int value, out int result, out int errorCode)
+    {
+        result = 0;
+        errorCode = 0;
+        using (var c = new System.Net.Sockets.TcpClient())
+        {
+            var ar = c.BeginConnect(ip, 53484, null, null);
+            if (!ar.AsyncWaitHandle.WaitOne(1200) || !c.Connected) return "not reachable (" + ip + ")";
+            c.EndConnect(ar);
+            c.ReceiveTimeout = 3000; c.SendTimeout = 3000;
+            var s = c.GetStream();
+            byte[] com = Encoding.ASCII.GetBytes((community + "    ").Substring(0, 4));
+            var pkt = new List<byte> { 0x02, 0x0A, com[0], com[1], com[2], com[3], (byte)(set ? 0x00 : 0x01), (byte)(item >> 8), (byte)item };
+            if (set) { pkt.Add(2); pkt.Add((byte)(value >> 8)); pkt.Add((byte)value); } else pkt.Add(0);
+            s.Write(pkt.ToArray(), 0, pkt.Count);
+            var buf = new byte[64];
+            int n = s.Read(buf, 0, buf.Length);
+            if (n < 10) return "short reply";
+            if (buf[6] != 0x01)
+            {
+                errorCode = n >= 12 ? (buf[10] << 8) | buf[11] : -1;
+                return errorCode == ErrNotAvailable
+                    ? string.Format("item 0x{0:X4} not available right now", item)
+                    : string.Format("item 0x{0:X4} refused (error 0x{1:X4})", item, errorCode);
+            }
+            if (!set && n >= 12) result = (buf[10] << 8) | buf[11];
+            return null;
+        }
+    }
+
+    public static string Get(string ip, string community, int item, out int value) { return Request(ip, community, false, item, 0, out value); }
+    public static string Get(string ip, string community, int item, out int value, out int errorCode) { return Request(ip, community, false, item, 0, out value, out errorCode); }
+    public static string Set(string ip, string community, int item, int value) { int d; return Request(ip, community, true, item, value, out d); }
+    public static string Set(string ip, string community, int item, int value, out int errorCode) { int d; return Request(ip, community, true, item, value, out d, out errorCode); }
+
+    public static string Describe(int displaySelect, int format)
+    {
+        string fmt = format == 1 ? "Side-by-Side" : format == 2 ? "Over-Under" : format == 0 ? "Simulated 3D" : "format " + format;
+        return displaySelect == 1 ? "3D, " + fmt : displaySelect == 0 ? "2D (Auto)" : displaySelect == 2 ? "2D" : "display select " + displaySelect;
+    }
+}
+
+// ---------------------------------------------------------------- ISO mounting
+// Mounts an ISO through the virtual-disk API without "permanent lifetime": the mount lasts only
+// while the handle is open, so Windows ejects it automatically when we close it - or if the
+// app exits or crashes mid-film. Needs admin rights, which the tray app has.
+sealed class IsoMount : IDisposable
+{
+    [StructLayout(LayoutKind.Sequential)] struct VIRTUAL_STORAGE_TYPE { public uint DeviceId; public Guid VendorId; }
+    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
+    static extern int OpenVirtualDisk(ref VIRTUAL_STORAGE_TYPE type, string path, uint access, uint flags, IntPtr parameters, out IntPtr handle);
+    [DllImport("virtdisk.dll")]
+    static extern int AttachVirtualDisk(IntPtr handle, IntPtr securityDescriptor, uint flags, uint providerFlags, IntPtr parameters, IntPtr overlapped);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+    const uint VIRTUAL_STORAGE_TYPE_DEVICE_ISO = 1;
+    const uint VIRTUAL_DISK_ACCESS_READ = 0x000d0000;
+    const uint ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY = 0x1;
+
+    IntPtr handle = IntPtr.Zero;
+    public string Drive;                    // e.g. "E:\"
+
+    // Returns null on success (Drive is set), else a message.
+    public string Mount(string isoPath)
+    {
+        var before = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in DriveInfo.GetDrives()) before.Add(d.Name);
+
+        var type = new VIRTUAL_STORAGE_TYPE { DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_ISO, VendorId = new Guid("EC984AEC-A0F9-47e9-901F-71415A66345B") };
+        int rc = OpenVirtualDisk(ref type, isoPath, VIRTUAL_DISK_ACCESS_READ, 0, IntPtr.Zero, out handle);
+        if (rc != 0) { handle = IntPtr.Zero; return "can't open the ISO (error " + rc + ")"; }
+        rc = AttachVirtualDisk(handle, IntPtr.Zero, ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY, 0, IntPtr.Zero, IntPtr.Zero);
+        if (rc != 0)
+        {
+            Dispose();
+            return rc == 32 ? "the ISO is already mounted - eject it first" : "can't mount the ISO (error " + rc + ")";
+        }
+
+        // Wait for the new drive letter to appear and become readable.
+        for (int i = 0; i < 60; i++)
+        {
+            foreach (var d in DriveInfo.GetDrives())
+            {
+                if (before.Contains(d.Name) || d.DriveType != DriveType.CDRom) continue;
+                try { if (d.IsReady) { Drive = d.Name; return null; } } catch { }
+            }
+            System.Threading.Thread.Sleep(250);
+        }
+        Dispose();
+        return "the ISO mounted but no drive letter appeared";
+    }
+
+    public void Dispose()
+    {
+        if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; }   // detaches (no permanent lifetime)
+    }
+}
+
 // ---------------------------------------------------------------- display
 static class Disp
 {
@@ -903,6 +1019,14 @@ class ModeSwitchApp : ApplicationContext
             return result.IndexOf("FAILED", StringComparison.Ordinal) >= 0 || result.StartsWith("Sound: unknown") ? 1 : 0;
         }
 
+        // ModeSwitch.exe --play3d <file>   3D Movie mode, mount (ISO), play, eject, switch back, exit
+        if (args.Length >= 2 && args[0].Equals("--play3d", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!File.Exists(args[1])) return 2;
+            new ModeSwitchApp(true).Play3D(Path.GetFullPath(args[1]));
+            return 0;
+        }
+
         // ModeSwitch.exe --apply movie|game   applies a mode and exits (used by the uninstaller)
         if (args.Length >= 2 && args[0].Equals("--apply", StringComparison.OrdinalIgnoreCase))
         {
@@ -925,6 +1049,7 @@ class ModeSwitchApp : ApplicationContext
         cfg = new Config(Path.Combine(exeDir, "config.ini"));
         cfg.Inherit("3d", "movie");            // 3D Movie = Movie plus its own overrides (e.g. display.3d)
         mode = ReadStoredMode();
+        InitBootHags();
         if (headless) return;
         syncCtl = new Control();
         { IntPtr forceHandle = syncCtl.Handle; }   // create the handle so BeginInvoke works
@@ -933,6 +1058,11 @@ class ModeSwitchApp : ApplicationContext
         BuildMenu();
         UpdateIcon();
         CheckDriverVersion();
+
+        var sync = new Timer();                         // follow mode changes made by --apply / --play3d
+        sync.Interval = 3000;
+        sync.Tick += (s, e) => SyncStoredMode();
+        sync.Start();
 
         // Things like the Afterburner curve and Windows HDR do not survive a reboot, so re-apply
         // the stored mode shortly after logon. GPU scheduling already matches, so no reboot prompt.
@@ -1051,6 +1181,7 @@ class ModeSwitchApp : ApplicationContext
             { problems.Add(l); continue; }
             if (l.StartsWith("stopped ") || l.StartsWith("Run bin\\")) continue;
             if (l.EndsWith("not connected - resolution unchanged")) continue;   // normal while on the TV
+            if (l.StartsWith("Projector: ") && l.EndsWith("settings skipped")) continue;   // projector off / TV in use
 
             Match m;
             if ((m = Regex.Match(l, @"^NVIDIA driver changed: (.+)$")).Success) lines.Add("Driver updated: " + m.Groups[1].Value);
@@ -1069,6 +1200,75 @@ class ModeSwitchApp : ApplicationContext
         if (at >= 0) lines[at] = "HDR: " + string.Join(", ", hdr.ToArray());
         problems.AddRange(lines);
         return string.Join("\n", problems.ToArray());
+    }
+
+    // Sets projector items (item:value pairs) over the network and reads them back.
+    // Returns a log line (null if no projector is configured); ok = everything applied.
+    // retry = keep trying for a few seconds (the projector may still be re-syncing to a new signal).
+    string ApplyProjector(List<KeyValuePair<uint, uint>> items, bool retry, out bool ok)
+    {
+        ok = false;
+        string ip = cfg.Get("projector.ip", ""), com = cfg.Get("projector.community", "SONY");
+        if (ip.Length == 0 || items.Count == 0) return null;
+        try
+        {
+            int power;
+            string err = Pj.Get(ip, com, Pj.ItemPower, out power);
+            if (err != null) return "Projector: " + err + " - settings skipped";
+            if (power != 3) return "Projector: not switched on - settings skipped";
+
+            bool offAnyway = false;          // "2D" refused because 3D isn't available at this signal at all
+            foreach (var kv in items)
+            {
+                bool isOff = kv.Key == Pj.ItemDisplaySelect && kv.Value == 0;
+                string e = null;
+                int code = 0;
+                for (int attempt = 0; attempt < (retry ? 4 : 1); attempt++)
+                {
+                    e = Pj.Set(ip, com, (int)kv.Key, (int)kv.Value, out code);
+                    if (e == null || (isOff && code == Pj.ErrNotAvailable)) break;
+                    if (retry) System.Threading.Thread.Sleep(1000);
+                }
+                if (e == null) continue;
+                if (isOff && code == Pj.ErrNotAvailable) { offAnyway = true; continue; }
+                return "Projector FAILED: " + e;
+            }
+
+            System.Threading.Thread.Sleep(500);
+            foreach (var kv in items)
+            {
+                bool isOff = kv.Key == Pj.ItemDisplaySelect && kv.Value == 0;
+                int v, code;
+                string e = Pj.Get(ip, com, (int)kv.Key, out v, out code);
+                if (e == null && v != (int)kv.Value)
+                    return string.Format("Projector: item 0x{0:X4} did not take effect (reads {1}, wanted {2})", kv.Key, v, kv.Value);
+                if (e != null && !(isOff && code == Pj.ErrNotAvailable))
+                    return "Projector: could not confirm - " + e;
+            }
+            ok = true;
+            int ds, fmt;
+            if (Pj.Get(ip, com, Pj.ItemDisplaySelect, out ds) == null && Pj.Get(ip, com, Pj.ItemFormat3D, out fmt) == null)
+                return "Projector: " + Pj.Describe(ds, fmt);
+            return offAnyway ? "Projector: 2D (3D isn't available at this resolution)" : "Projector: 2D";
+        }
+        catch (Exception ex) { return "Projector FAILED: " + ex.Message; }
+    }
+
+    static List<KeyValuePair<uint, uint>> Projector3D(int format)
+    {
+        return new List<KeyValuePair<uint, uint>>
+        {
+            new KeyValuePair<uint, uint>(Pj.ItemDisplaySelect, 1),
+            new KeyValuePair<uint, uint>(Pj.ItemFormat3D, (uint)format)
+        };
+    }
+
+    // Frame-compatible files usually say so in the name. Everything else (ISO / MVC, which madVR
+    // outputs top-and-bottom, and TAB/OU files) is Over-Under.
+    static int Format3DFromName(string path)
+    {
+        string n = Path.GetFileNameWithoutExtension(path);
+        return Regex.IsMatch(n, @"(?i)(^|[\W_])(h-?sbs|half-?sbs|f-?sbs|full-?sbs|sbs|side[\W_]?by[\W_]?side)([\W_]|$)") ? 1 : 2;
     }
 
     // "1920x1080@23" on the display named by display.target (blank = primary). Returns a log line.
@@ -1123,6 +1323,32 @@ class ModeSwitchApp : ApplicationContext
              + "\nRun bin\\NvProbe.exe and update config.ini (see README: Driver updates).";
     }
 
+    // ---- is a reboot really pending? ----
+    // HAGS only changes at boot, so compare the registry with the value it had when Windows started:
+    // switching Game -> Movie without rebooting puts it back, and then no reboot is needed.
+    [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+    int bootHags = -1;
+
+    void InitBootHags()
+    {
+        DateTime boot = DateTime.Now - TimeSpan.FromMilliseconds(GetTickCount64());
+        string stamp = boot.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        string storedStamp = ReadReg("BootTime");
+        int stored;
+        DateTime storedBoot;
+        if (storedStamp != null && int.TryParse(ReadReg("BootHags") ?? "", out stored)
+            && DateTime.TryParseExact(storedStamp, "yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out storedBoot)
+            && Math.Abs((storedBoot - boot).TotalMinutes) <= 2)
+            bootHags = stored;                               // same boot: keep what was active at boot
+        else
+        {
+            bootHags = HagsValue();                          // first start since boot: registry = active value
+            WriteReg("BootTime", stamp);
+            WriteReg("BootHags", bootHags.ToString(CultureInfo.InvariantCulture));
+        }
+        rebootPending = HagsValue() != bootHags;
+    }
+
     static int HagsValue()
     {
         try
@@ -1169,6 +1395,10 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(movie);
         menu.Items.Add(movie3d);
         menu.Items.Add(game);
+        string nowPlaying = playingTitle;
+        var play3d = new ToolStripMenuItem(nowPlaying != null ? "Playing in 3D: " + nowPlaying : "Play 3D Blu-ray / 3D film...", null, (s, e) => Play3DFromMenu());
+        play3d.Enabled = !busy && !playing;
+        menu.Items.Add(play3d);
         menu.Items.Add(new ToolStripSeparator());
 
         var refresh = new ToolStripMenuItem("Refresh rate");
@@ -1222,6 +1452,8 @@ class ModeSwitchApp : ApplicationContext
         if (hdr.DropDownItems.Count == 0) hdr.Enabled = false;
         menu.Items.Add(hdr);
         menu.Items.Add(BuildSoundMenu());
+        var pjMenu = BuildProjectorMenu();
+        if (pjMenu != null) menu.Items.Add(pjMenu);
         menu.Items.Add(new ToolStripSeparator());
 
         if (rebootPending) menu.Items.Add(new ToolStripMenuItem("Reboot now", null, (s, e) => Reboot()));
@@ -1232,6 +1464,60 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open config.ini", null, (s, e) => Process.Start("notepad.exe", cfg.Path)));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (s, e) => { tray.Visible = false; Application.Exit(); }));
+    }
+
+    // "Projector: <state>" with 2D / 3D Over-Under / 3D Side-by-Side, when projector.ip is set.
+    ToolStripMenuItem BuildProjectorMenu()
+    {
+        string ip = cfg.Get("projector.ip", ""), com = cfg.Get("projector.community", "SONY");
+        if (ip.Length == 0) return null;
+
+        int power = -1, ds = -1, fmt = -1;
+        string err = null;
+        try
+        {
+            err = Pj.Get(ip, com, Pj.ItemPower, out power);
+            if (err == null && power == 3)
+            {
+                int code;
+                string e = Pj.Get(ip, com, Pj.ItemDisplaySelect, out ds, out code);
+                if (e != null && code == Pj.ErrNotAvailable) ds = -2;          // 4K signal: 3D settings greyed out
+                else if (e != null) err = e;
+                else err = Pj.Get(ip, com, Pj.ItemFormat3D, out fmt);
+            }
+        }
+        catch (Exception ex) { err = ex.Message; }
+
+        string state = err != null ? "not reachable" : power != 3 ? "standby" : ds == -2 ? "2D (3D needs 1080p)" : Pj.Describe(ds, fmt);
+        var item = new ToolStripMenuItem("Projector: " + state);
+        bool on = err == null && power == 3;
+
+        var choices = new[]
+        {
+            new { Label = "2D (Auto)",        Items = new List<KeyValuePair<uint, uint>> { new KeyValuePair<uint, uint>(Pj.ItemDisplaySelect, 0) }, Checked = ds == 0 || ds == -2 },
+            new { Label = "3D Over-Under",    Items = Projector3D(2), Checked = ds == 1 && fmt == 2 },
+            new { Label = "3D Side-by-Side",  Items = Projector3D(1), Checked = ds == 1 && fmt == 1 },
+        };
+        foreach (var c in choices)
+        {
+            var choice = c;
+            var mi = new ToolStripMenuItem(choice.Label, null, (s, e) =>
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    bool ok;
+                    string line = ApplyProjector(choice.Items, true, out ok) ?? "Projector: not configured";
+                    if (!ok && line.IndexOf("not available", StringComparison.Ordinal) >= 0)
+                        line = "Projector: 3D is only available at 1080p - use 3D Movie mode";
+                    WriteLog("projector " + choice.Label, line);
+                    Say(line, !ok);
+                }));
+            mi.Checked = choice.Checked;
+            mi.Enabled = on;
+            item.DropDownItems.Add(mi);
+        }
+        item.DropDownItems.Add(new ToolStripSeparator());
+        item.DropDownItems.Add(new ToolStripMenuItem("Open projector web page", null, (s, e) => OpenAsUser("http://" + ip + "/")));
+        return item;
     }
 
     // "Sound: <current>" with the presets underneath, for the current default playback device.
@@ -1267,53 +1553,205 @@ class ModeSwitchApp : ApplicationContext
         return item;
     }
 
+    // ---- 3D playback ----
+    volatile bool playing;
+    volatile string playingTitle;
+
+    void Play3DFromMenu()
+    {
+        string file = null;
+        using (var dlg = new OpenFileDialog())
+        {
+            dlg.Title = "Play in 3D";
+            dlg.Filter = "3D Blu-ray ISO or 3D video (*.iso;*.mkv;*.m2ts;*.mp4)|*.iso;*.mkv;*.m2ts;*.mp4|All files (*.*)|*.*";
+            string last = ReadReg("Last3DFolder");
+            if (!string.IsNullOrEmpty(last) && Directory.Exists(last)) dlg.InitialDirectory = last;
+            // A tray app has no window of its own; a hidden topmost owner keeps the dialog in front.
+            using (var owner = new Form { TopMost = true, ShowInTaskbar = false, FormBorderStyle = FormBorderStyle.None,
+                                          StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000), Size = new Size(1, 1) })
+            {
+                owner.Show();
+                owner.Activate();
+                if (dlg.ShowDialog(owner) == DialogResult.OK) file = dlg.FileName;
+            }
+        }
+        if (file == null) return;
+        WriteReg("Last3DFolder", Path.GetDirectoryName(file));
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate { Play3D(file); });
+    }
+
+    // Switch to 3D Movie, mount an ISO if needed, play fullscreen, then eject and switch back.
+    // Runs on a background thread (or in the --play3d command-line process).
+    void Play3D(string file)
+    {
+        if (playing) return;
+        playing = true;
+        playingTitle = Path.GetFileNameWithoutExtension(file);
+        string previous = mode;
+        bool keepHags = previous == "game";          // no reboot either way
+        IsoMount iso = null;
+        var log = new StringBuilder();
+        try
+        {
+            if (mode != "3d") RunSwitch("3d", keepHags, false);
+
+            // Projector to 3D in the format this file needs (Side-by-Side files say so in the name).
+            int fmt = Format3DFromName(file);
+            bool pjOk;
+            string pjLine = ApplyProjector(Projector3D(fmt), true, out pjOk);
+            if (pjLine != null) log.AppendLine(pjLine);
+            string pjNote = pjOk ? "Projector: 3D, " + (fmt == 1 ? "Side-by-Side" : "Over-Under")
+                                 : cfg.Get("reminder.3d", "Set the projector's 3D format to match the film.");
+
+            string target = file;
+            if (file.EndsWith(".iso", StringComparison.OrdinalIgnoreCase))
+            {
+                iso = new IsoMount();
+                string err = iso.Mount(file);
+                if (err != null) { Say("3D FAILED: " + err, true); log.AppendLine("mount FAILED: " + err); return; }
+                target = Path.Combine(iso.Drive, @"BDMV\index.bdmv");
+                if (!File.Exists(target)) { Say("3D FAILED: " + Path.GetFileName(file) + " isn't a Blu-ray (no BDMV folder)", true); log.AppendLine("no BDMV\\index.bdmv on " + iso.Drive); return; }
+                log.AppendLine("mounted " + Path.GetFileName(file) + " as " + iso.Drive.TrimEnd('\\'));
+            }
+
+            string player = PlayerPath();
+            if (!File.Exists(player)) { Say("3D FAILED: player not found: " + player, true); log.AppendLine("player not found: " + player); return; }
+            string args = "\"" + target + "\" " + cfg.Get("play3d.args", "/fullscreen /play");
+            Process p = Process.Start(new ProcessStartInfo(player, args) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(player) });
+            log.AppendLine("playing " + target + " with " + Path.GetFileName(player));
+            Say("Playing " + playingTitle + " in 3D\n" + pjNote, false);
+
+            WaitForPlayer(p, Path.GetFileNameWithoutExtension(player));
+            log.AppendLine("player closed");
+        }
+        catch (Exception ex) { log.AppendLine("FAILED: " + ex.Message); Say("3D FAILED: " + ex.Message, true); }
+        finally
+        {
+            if (iso != null) { iso.Dispose(); if (iso.Drive != null) log.AppendLine("ejected " + iso.Drive.TrimEnd('\\')); }
+            // Projector back to 2D so the desktop is usable again - now, while the signal is still
+            // 1080p (its 3D settings disappear once the mode switch below goes back to 4K).
+            if (cfg.Get("projector.ip", "").Length > 0)
+            {
+                bool off;
+                string line = ApplyProjector(new List<KeyValuePair<uint, uint>> { new KeyValuePair<uint, uint>(Pj.ItemDisplaySelect, 0) }, true, out off);
+                if (line != null) log.AppendLine(line);
+            }
+            WriteLog("play 3d: " + Path.GetFileName(file), log.ToString().TrimEnd());
+            playing = false;
+            playingTitle = null;
+            // Go back to where we started, unless someone picked a different mode meanwhile.
+            if (previous != "3d" && mode == "3d") RunSwitch(previous, keepHags, false);
+            else Ui(delegate { UpdateIcon(); });
+        }
+    }
+
+    // MPC-HC may hand the file to an already-open window and exit straight away; if so, wait for
+    // that window to close instead - otherwise the ISO would be ejected mid-film.
+    static void WaitForPlayer(Process started, string exeName)
+    {
+        if (!started.WaitForExit(5000)) { started.WaitForExit(); return; }
+        while (Process.GetProcessesByName(exeName).Length > 0) System.Threading.Thread.Sleep(1000);
+    }
+
+    // The player .mkv files open with (the K-Lite MPC-HC here), unless play3d.player is set.
+    string PlayerPath()
+    {
+        string configured = cfg.Get("play3d.player", "");
+        if (configured.Length > 0) return configured;
+        try
+        {
+            using (RegistryKey uc = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.mkv\UserChoice"))
+            {
+                string progId = uc == null ? null : uc.GetValue("ProgId") as string;
+                if (progId != null)
+                    using (RegistryKey cmd = Registry.ClassesRoot.OpenSubKey(progId + @"\shell\open\command"))
+                    {
+                        string line = cmd == null ? null : cmd.GetValue("") as string;
+                        var m = line == null ? Match.Empty : Regex.Match(line, "^\\s*\"([^\"]+)\"|^\\s*(\\S+)");
+                        if (m.Success) return m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+                    }
+            }
+        }
+        catch { }
+        return @"C:\Program Files (x86)\K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe";
+    }
+
+    void Say(string text, bool warn) { Ui(delegate { Notify(text, warn); }); }
+
+    // The tray keeps its icon in step if the mode is changed by another process (--apply / --play3d).
+    void SyncStoredMode()
+    {
+        if (busy || playing) return;
+        string stored = ReadReg("Mode");
+        if (stored == null) return;
+        stored = ParseMode(stored);
+        if (stored != mode) { mode = stored; UpdateIcon(); }
+    }
+
     // ---- switching ----
     // A switch takes several seconds (Afterburner has to start and apply), so run it off the UI
     // thread and show a "switching" icon meanwhile, otherwise the tray looks frozen.
     void Switch(string target)
     {
-        if (headless) { DoSwitch(target); return; }
+        if (headless) { DoSwitch(target, false); return; }
         if (busy) return;
         busy = true;
         pendingTarget = target;
         UpdateIcon();
-        Notify("Switching to " + ModeName(target) + " mode...", false);
-
-        System.Threading.ThreadPool.QueueUserWorkItem(delegate
-        {
-            string text;
-            try { text = DoSwitch(target); }
-            catch (Exception ex) { text = "failed: " + ex.Message; }
-            try
-            {
-                syncCtl.BeginInvoke((MethodInvoker)delegate
-                {
-                    busy = false;
-                    pendingTarget = null;
-                    UpdateIcon();
-                    bool problem = text.IndexOf("rc=", StringComparison.Ordinal) >= 0 || text.StartsWith("failed")
-                                || text.IndexOf("FAILED", StringComparison.Ordinal) >= 0
-                                || text.IndexOf("did not take effect", StringComparison.Ordinal) >= 0
-                                || text.IndexOf("exited", StringComparison.Ordinal) >= 0;
-
-                    // Everything has been applied by now. If a reboot is needed, the summary goes into
-                    // the reboot dialog itself (a balloon shown just before a dialog gets hidden by it).
-                    if (rebootPending)
-                    {
-                        var answer = MessageBox.Show(
-                            string.Format("{0} mode applied:\n\n{1}\n\nGPU scheduling only changes after a reboot.\n\nReboot now?",
-                                ModeName(target), text),
-                            "ModeSwitch", MessageBoxButtons.YesNo, problem ? MessageBoxIcon.Warning : MessageBoxIcon.Question);
-                        if (answer == DialogResult.Yes) Reboot();
-                    }
-                    else Notify(Summarize(text), problem);
-                });
-            }
-            catch { busy = false; }
-        });
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate { RunSwitch(target, false, true); });
     }
 
-    string DoSwitch(string target)
+    static bool IsProblem(string text)
+    {
+        return text.IndexOf("rc=", StringComparison.Ordinal) >= 0 || text.StartsWith("failed")
+            || text.IndexOf("FAILED", StringComparison.Ordinal) >= 0
+            || text.IndexOf("did not take effect", StringComparison.Ordinal) >= 0
+            || text.IndexOf("exited", StringComparison.Ordinal) >= 0;
+    }
+
+    // Runs a switch on the calling (background) thread and updates the tray around it.
+    // keepHags leaves GPU scheduling alone (used by 3D playback, so it never needs a reboot);
+    // askReboot = false suppresses the reboot dialog for the same reason.
+    string RunSwitch(string target, bool keepHags, bool askReboot)
+    {
+        busy = true;
+        pendingTarget = target;
+        Ui(delegate { UpdateIcon(); Notify("Switching to " + ModeName(target) + " mode...", false); });
+
+        string text;
+        try { text = DoSwitch(target, keepHags); }
+        catch (Exception ex) { text = "failed: " + ex.Message; }
+
+        Ui(delegate
+        {
+            busy = false;
+            pendingTarget = null;
+            UpdateIcon();
+            bool problem = IsProblem(text);
+            // Everything has been applied by now. If a reboot is needed, the summary goes into the
+            // reboot dialog itself (a balloon shown just before a dialog gets hidden by it).
+            if (rebootPending && askReboot)
+            {
+                var answer = MessageBox.Show(
+                    string.Format("{0} mode applied:\n\n{1}\n\nGPU scheduling only changes after a reboot.\n\nReboot now?",
+                        ModeName(target), text),
+                    "ModeSwitch", MessageBoxButtons.YesNo, problem ? MessageBoxIcon.Warning : MessageBoxIcon.Question);
+                if (answer == DialogResult.Yes) Reboot();
+            }
+            else Notify(Summarize(text), problem);
+        });
+        return text;
+    }
+
+    // Runs `action` on the UI thread (no-op in headless mode).
+    void Ui(MethodInvoker action)
+    {
+        if (headless || syncCtl == null) return;
+        try { syncCtl.BeginInvoke(action); }
+        catch { }
+    }
+
+    string DoSwitch(string target, bool keepHags)
     {
         var log = new StringBuilder();
         bool isGame = target == "game";
@@ -1353,10 +1791,22 @@ class ModeSwitchApp : ApplicationContext
             if (cerr != null) log.AppendLine("clock offsets: " + cerr);
         }
 
-        // 2b. Display resolution/refresh (e.g. 3D Movie: projector to 1080p, Movie: back to 4K).
+        // 2b. Projector over the network (3D on/off, 3D format). Its 3D settings only exist while a
+        //     1080p-or-lower signal is shown, so leaving 3D has to happen before the switch to 4K:
+        //     try once now...
+        bool pjOk = false;
+        string pjLine = null;
+        var pjItems = cfg.GetSettings("projector." + p);
+        if (pjItems.Count > 0) pjLine = ApplyProjector(pjItems, false, out pjOk);
+
+        // 2c. Display resolution/refresh (e.g. 3D Movie: projector to 1080p, Movie: back to 4K).
         //     Before HDR and sound, since a mode change re-negotiates the HDMI link.
         string res = cfg.Get("display." + p, "");
         if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+
+        // 2d. ...and entering 3D only works once the 1080p signal is there, so retry after the change.
+        if (pjItems.Count > 0 && !pjOk) pjLine = ApplyProjector(pjItems, true, out pjOk);
+        if (pjLine != null) log.AppendLine(pjLine);
 
         // 3. HDR
         bool hdrWanted = cfg.GetBool("hdr." + p, isGame);
@@ -1371,7 +1821,8 @@ class ModeSwitchApp : ApplicationContext
         if (soundKey.Length > 0) log.AppendLine(ApplySound(soundKey));
 
         // 3c. Anything the app can't do itself, e.g. the projector's 3D format for frame-compatible 3D.
-        string reminder = cfg.Get("reminder." + p, "");
+        //     With network control, a different note (e.g. 3D: how the projector gets switched to 3D).
+        string reminder = pjOk ? cfg.Get("reminder." + p + ".networked", "") : cfg.Get("reminder." + p, "");
         if (reminder.Length > 0) log.AppendLine(reminder);
 
         // 4. Afterburner / RTSS
@@ -1397,17 +1848,21 @@ class ModeSwitchApp : ApplicationContext
             }
         }
 
-        // 5. HAGS (needs reboot)
+        // 5. HAGS (needs reboot). Skipped for 3D playback started from Game mode, so it round-trips
+        //    without ever needing a reboot.
         int hagsWanted = cfg.GetInt("hags." + p, isGame ? 2 : 1);
         int hagsNow = HagsValue();
-        if (hagsNow != hagsWanted)
+        if (keepHags && hagsNow != hagsWanted)
+            log.AppendLine("GPU scheduling: left " + (hagsNow == 2 ? "on" : "off") + " for 3D playback");
+        else if (hagsNow != hagsWanted)
         {
             try
             {
                 using (RegistryKey k = Registry.LocalMachine.OpenSubKey(HagsKey, true))
                     k.SetValue("HwSchMode", hagsWanted, RegistryValueKind.DWord);
-                rebootPending = true;
-                log.AppendLine("GPU scheduling: " + (hagsWanted == 2 ? "on" : "off") + " after reboot");
+                rebootPending = hagsWanted != bootHags;
+                log.AppendLine("GPU scheduling: " + (hagsWanted == 2 ? "on" : "off")
+                    + (rebootPending ? " after reboot" : " (back to what's running - no reboot needed)"));
             }
             catch (Exception ex) { log.AppendLine("GPU scheduling: " + ex.Message + " (run elevated)"); }
         }
