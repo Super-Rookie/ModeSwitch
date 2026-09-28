@@ -1,6 +1,7 @@
 # ModeSwitch
 
-A Windows tray app that flips a PC between a **Movie** preset and a **Game** preset with one click.
+A Windows tray app that flips a PC between a **Movie** preset and a **Game** preset with one click,
+and between a **TV room** and a **Theatre room** (projector, AV receiver, subwoofer).
 
 It was built for a home-theatre PC with an NVIDIA GPU, where the settings that suit gaming
 (hardware-accelerated GPU scheduling, G-SYNC, HDR, an undervolt) caused stutter in madVR/MPC-HC
@@ -97,8 +98,60 @@ after driver 425.31, and DirectX 11 stereo is gone on RTX 30-series and newer. O
   the matching format.
 - For full-resolution frame-packed 3D, a standalone 3D-capable player is the dependable route.
 
+Tested on an RTX 5080 with driver 616.64 and the NVIDIA stereo driver reinstalled (via 3D Fix
+Manager): Direct3D 11 still offers **no stereo display modes**, so madVR can't frame-pack there
+either. madVR has no Direct3D 9 stereo output, so there is no workaround inside madVR. Keep
+`play3d.framepacking = false` and madVR on top-and-bottom. Set it to `true` only on hardware whose
+driver does offer stereo modes. ISO/MVC films then leave the projector on Auto, since it detects
+frame packing by itself.
+
 The madVR 3D format only applies to MVC content, so it can stay set permanently without affecting
 2D playback.
+
+## Rooms: TV or Theatre
+
+A second choice in the menu, independent of Movie / 3D Movie / Game, for a setup with a TV in one
+place and a projector, AV receiver and subwoofer in another:
+
+| | TV room | Theatre room |
+|---|---|---|
+| LG TV (webOS) | on, switched to the PC's input | off |
+| AV receiver (Sony) | off | on, switched to the PC's input |
+| Projector (Sony) | off | on |
+| Subwoofer (on a TP-Link Tapo smart plug) | off | on |
+| Windows display | the TV only | the projector only |
+| Windows default sound device | the TV | the receiver |
+
+After the devices, the current mode's resolution, HDR and sound preset are applied for the display
+now in use, with `sound.<room>.<mode>` (e.g. `sound.tv.movie`) overriding `sound.<mode>`. **Play
+3D…** switches to the Theatre room first. Also `ModeSwitch.exe --room tv|theatre`.
+
+Order matters for comfort and speed:
+- The projector is switched on first, because it takes longest to warm up.
+- The subwoofer comes on only once the picture is there (so the receiver is on), and goes off
+  before the receiver, so it never thumps.
+- The TV is switched off only after Windows has moved to the projector.
+
+A switch typically takes about 20 seconds either way, mostly the projector warming up or the TV
+waking. Each switch logs per-step timings, e.g.
+`took 23s: projector 0.0s, receiver 5.1s, display 13.8s, ...`.
+
+### How each device is controlled
+
+| Device | Protocol | Notes |
+|---|---|---|
+| LG TV | webOS SSAP: JSON over a websocket, port 3000 (3001 TLS) | Pair once from **Room setup → Pair TV** and accept the prompt on the TV. It's switched on with Wake-on-LAN (`tv.mac`), which needs **General → Mobile TV On → Turn on via Wi-Fi** on the TV. After a long spell off it can take over 30 s to answer. The switch waits 20 s, then carries on and selects the input in the background. |
+| Sony receiver (STR-DN1080) | Sony Audio Control API: JSON-RPC over HTTP, port 10000 | Needs **Network Settings → External Control: On**. It accepts only `setPowerStatus` `off` (`standby` is refused). That puts it in a deep standby that also cuts its USB power and drops it off the network. UK/EU models have no Network Standby / Remote Start setting, and Wake-on-LAN doesn't wake it, so **it can't be switched on over the network**. The Theatre switch asks for the remote and carries on. Its network takes over a minute to come back, so the PC input is selected in the background. Anything powered from its USB port (e.g. an IR extender) needs another USB supply. |
+| Sony projector | PJ Talk / SDCP, TCP 53484 | Power item `0x0130` (1 on, 0 off), status `0x0102`. It stays reachable in standby. |
+| TP-Link Tapo plug | KLAP (handshake, then AES-encrypted requests) | Enter the TP-Link account login once from **Room setup → Subwoofer plug login…**. It's stored DPAPI-encrypted in `HKCU\Software\ModeSwitch`, readable only by that Windows user, never in a file. |
+
+Windows remembers a display layout for each combination of connected displays, so switching a
+device on by hand can bring back an old layout, e.g. "TV only" in the Theatre room. With
+`room.followdisplay = true`, ModeSwitch puts the room's display, sound device and resolution back
+whenever a display connects or disconnects. It only acts on such a change, so a layout chosen
+afterwards with Win+P is left alone.
+
+**Room setup → Check devices** reads every device's state without changing anything.
 
 ## Sound presets
 
@@ -191,12 +244,13 @@ anything by itself, so a stray click can't change modes (and GPU scheduling) by 
 - The menu has:
   - Movie mode / 3D Movie mode / Game mode
   - **Play 3D Blu-ray / 3D film…**
+  - **TV room** / **Theatre room**, and **Room setup** (check devices, pair the TV, the Tapo login)
   - **Refresh rate**: a submenu per display, listing every rate at its current resolution
   - **HDR**: current state, with each display listed and ticked if HDR is on; click one to toggle it
   - **Sound**: the current output and format, with the four presets underneath; the active one is ticked
   - Reboot now (only while a reboot is pending)
   - **NVIDIA Control Panel** and **Windows display settings**, opened as your normal user (not elevated)
-  - Open config.ini
+  - Open config.ini (and config.local.ini, if there is one)
   - Exit
 
 A switch runs in the background. The icon turns amber immediately and the menu shows
@@ -206,6 +260,21 @@ After logon, ModeSwitch re-applies the stored mode (after `apply.onstart.delayms
 Afterburner curve and Windows HDR do not survive a reboot on their own.
 
 ## Configuration (`bin\config.ini`)
+
+Keys in `bin\config.local.ini`, if present, override `config.ini`. Put your own network details
+there: `projector.ip`, `tv.ip`, `tv.mac`, `avr.ip`, `sub.ip`. It's in `.gitignore`, so they stay
+out of source control, and `config.ini` ships with them blank:
+
+```ini
+projector.ip = 192.168.1.50
+tv.ip        = 192.168.1.51
+tv.mac       = AA-BB-CC-DD-EE-FF
+avr.ip       = 192.168.1.52
+sub.ip       = 192.168.1.53
+```
+
+Pairing keys and the Tapo login are kept in the registry (`HKCU\Software\ModeSwitch`), never in
+these files.
 
 | Key | Meaning |
 |---|---|
@@ -226,6 +295,15 @@ Afterburner curve and Windows HDR do not survive a reboot on their own.
 | `projector.ip`, `projector.community` | projector address and PJ Talk community (default `SONY`) |
 | `projector.<mode>` | projector items to set per mode, as `item:value` pairs (e.g. `0x0060:0`) |
 | `play3d.player`, `play3d.args` | player for Play 3D… (blank = whatever `.mkv` opens with) and its arguments |
+| `play3d.framepacking` | `true` only if the driver offers stereo modes (see 3D playback notes) |
+| `room.<room>.display` | display(s) for the room, by name, as a preference list (`SONY PJ, SONY AVSYSTEM`) |
+| `room.<room>.audio` | the room's default sound device, by name |
+| `room.followdisplay` | put the room's display back when a display connects or disconnects |
+| `room.tv.receiveroff` | `false` = leave the receiver on in the TV room |
+| `tv.ip`, `tv.mac`, `tv.input` | LG TV address, MAC for Wake-on-LAN, and the PC's input (`HDMI_1`) |
+| `avr.ip`, `avr.input`, `avr.inputname` | receiver address, the PC's input (`extInput:bd-dvd`), and its name for messages |
+| `sub.ip` | the subwoofer's Tapo plug |
+| `sound.<room>.<mode>` | sound preset for that mode in that room; `none` = leave sound alone |
 | `display.target` | part of the display's name the resolution keys apply to (blank = primary display) |
 | `display.<mode>` | resolution and refresh for that mode, e.g. `1920x1080@23`; skipped if the display isn't connected |
 | `reminder.<mode>` | a line added to that mode's notification, for things the app can't do itself |
@@ -327,14 +405,16 @@ no SDK or Visual Studio is needed. The source avoids C# 6+ syntax for that reaso
 | File | Purpose |
 |---|---|
 | `src\ModeSwitch.cs` | the tray app |
+| `src\Room.cs` | TV / receiver / Tapo plug control, and which display Windows uses |
 | `src\NvProbe.cs` | read-only dump of sync-related NVIDIA driver profile settings |
 | `src\NvClocks.cs` | read, or set, GPU pstate clock offsets |
 | `bin\config.ini` | all settings |
+| `bin\config.local.ini` | your device addresses (not in git) |
 | `install.ps1` | installer / uninstaller |
 | `build.ps1` | builds everything into `bin\` |
 
 `ModeSwitch.exe --apply movie|3d|game` applies a mode without the tray icon and exits. The uninstaller
-uses it.
+uses it. `ModeSwitch.exe --room tv|theatre` does the same for a room.
 
 ## Caveats
 
@@ -344,4 +424,6 @@ uses it.
 - Applying a GPU overclock or undervolt is at your own risk. On the machine this was built for,
   a +1500 MHz memory offset coincided with daily GPU hangs, which is why both presets ship with
   the memory override at 0.
-- Not affiliated with NVIDIA, MSI or Microsoft.
+- The LG, Sony and Tapo protocols are the devices' own network APIs, several of them
+  reverse-engineered by the community. A firmware update could change them.
+- Not affiliated with NVIDIA, MSI, Microsoft, LG, Sony or TP-Link.

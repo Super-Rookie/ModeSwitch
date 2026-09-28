@@ -20,9 +20,17 @@ class Config
     readonly Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     public string Path;
 
+    // Reads config.ini, then config.local.ini next to it (if present), whose keys win. The local
+    // file holds this home's device addresses and stays out of source control.
     public Config(string path)
     {
         Path = path;
+        Load(path);
+        Load(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path), "config.local.ini"));
+    }
+
+    void Load(string path)
+    {
         if (!File.Exists(path)) return;
         foreach (string raw in File.ReadAllLines(path))
         {
@@ -461,6 +469,7 @@ static class Snd
         [PreserveSig] int SetShareMode([MarshalAs(UnmanagedType.LPWStr)] string id, IntPtr m);
         [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string id, [MarshalAs(UnmanagedType.Bool)] bool fx, ref PKEY k, out PV v);
         [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string id, [MarshalAs(UnmanagedType.Bool)] bool fx, ref PKEY k, ref PV v);
+        [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id, int role);
     }
     [ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")] class PolicyConfigClient { }
 
@@ -486,6 +495,41 @@ static class Snd
             }
         }
         catch { return "default output"; }
+    }
+
+    // Makes the active playback device whose name contains `nameContains` the default (all roles).
+    // Returns null on success, else a message. HDMI audio devices only appear once the display is on.
+    public static string SetDefaultOutput(string nameContains, out string deviceName)
+    {
+        deviceName = null;
+        string found = null;
+        using (RegistryKey render = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"))
+        {
+            if (render == null) return "no playback devices";
+            foreach (string guid in render.GetSubKeyNames())
+            {
+                using (RegistryKey k = render.OpenSubKey(guid))
+                {
+                    object state = k == null ? null : k.GetValue("DeviceState");
+                    if (state == null || Convert.ToInt32(state) != 1) continue;          // 1 = active
+                    string ep = "{0.0.0.00000000}." + guid;
+                    string name = DeviceName(ep);
+                    if (name.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    found = ep; deviceName = name;
+                    break;
+                }
+            }
+        }
+        if (found == null) return nameContains + " audio isn't available";
+        string winrtId, current;
+        if (GetDefault(out winrtId, out current) && current.Equals(found, StringComparison.OrdinalIgnoreCase)) return null;
+        var pc = (IPolicyConfig)new PolicyConfigClient();
+        for (int role = 0; role < 3; role++)                  // console, multimedia, communications
+        {
+            int rc = pc.SetDefaultEndpoint(found, role);
+            if (rc != 0) return string.Format("default output rc=0x{0:X}", rc);
+        }
+        return null;
     }
 
     static bool GetDefault(out string winrtId, out string endpointId)
@@ -1002,6 +1046,8 @@ class ModeSwitchApp : ApplicationContext
     volatile string driverNote;          // "NVIDIA driver changed: A -> B", reported with the next switch
     volatile bool busy;                  // a switch is running on a background thread
     volatile string pendingTarget;       // mode being switched to, for the icon
+    volatile string pendingRoom;         // room being switched to, for the icon
+    string room;                         // "tv" | "theatre"
     Control syncCtl;                     // marshals results back to the UI thread
 
     [STAThread]
@@ -1028,6 +1074,14 @@ class ModeSwitchApp : ApplicationContext
             return 0;
         }
 
+        // ModeSwitch.exe --room tv|theatre   powers the room's devices, moves Windows' display and sound
+        if (args.Length >= 2 && args[0].Equals("--room", StringComparison.OrdinalIgnoreCase))
+        {
+            var roomApp = new ModeSwitchApp(true);
+            string text = roomApp.DoRoomSwitch(ParseRoom(args[1]));
+            return IsProblem(text) ? 1 : 0;
+        }
+
         // ModeSwitch.exe --apply movie|game   applies a mode and exits (used by the uninstaller)
         if (args.Length >= 2 && args[0].Equals("--apply", StringComparison.OrdinalIgnoreCase))
         {
@@ -1050,6 +1104,7 @@ class ModeSwitchApp : ApplicationContext
         cfg = new Config(Path.Combine(exeDir, "config.ini"));
         cfg.Inherit("3d", "movie");            // 3D Movie = Movie plus its own overrides (e.g. display.3d)
         mode = ReadStoredMode();
+        room = ReadStoredRoom();
         InitBootHags();
         if (headless) return;
         syncCtl = new Control();
@@ -1070,7 +1125,13 @@ class ModeSwitchApp : ApplicationContext
 
         var sync = new Timer();                         // follow mode changes made by --apply / --play3d
         sync.Interval = 3000;
-        sync.Tick += (s, e) => SyncStoredMode();
+        sync.Tick += (s, e) =>
+        {
+            SyncStoredMode();
+            FollowRoomDisplay();
+            // Never leave the "switching" icon up once nothing is switching.
+            if (!busy && iconShowsBusy) { pendingRoom = null; pendingTarget = null; UpdateIcon(); }
+        };
         sync.Start();
 
         // Things like the Afterburner curve and Windows HDR do not survive a reboot, so re-apply
@@ -1108,6 +1169,32 @@ class ModeSwitchApp : ApplicationContext
     static string ModeName(string m)
     {
         return m == "game" ? "Game" : m == "3d" ? "3D Movie" : "Movie";
+    }
+
+    static string ParseRoom(string s)
+    {
+        s = (s ?? "").Trim().ToLowerInvariant();
+        return s == "tv" ? "tv" : "theatre";
+    }
+
+    static string RoomName(string r)
+    {
+        return r == "tv" ? "TV" : "Theatre";
+    }
+
+    // Stored room, or on first run whichever display is in use.
+    string ReadStoredRoom()
+    {
+        string r = ReadReg("Room");
+        if (r == "tv" || r == "theatre") return r;
+        try
+        {
+            string theatreDisplay = cfg.Get("room.theatre.display", "SONY");
+            foreach (string n in DispTopo.Active())
+                if (n.IndexOf(theatreDisplay, StringComparison.OrdinalIgnoreCase) >= 0) return "theatre";
+        }
+        catch { }
+        return "tv";
     }
 
     void StoreMode()
@@ -1272,12 +1359,16 @@ class ModeSwitchApp : ApplicationContext
         };
     }
 
-    // Frame-compatible files usually say so in the name. Everything else (ISO / MVC, which madVR
-    // outputs top-and-bottom, and TAB/OU files) is Over-Under.
-    static int Format3DFromName(string path)
+    // Frame-compatible files usually say so in the name: 1 = Side-by-Side, 2 = Over-Under.
+    // Everything else (ISO / MVC) returns 0 = frame packing when madVR outputs real frame-packed 3D
+    // (play3d.framepacking), which the projector detects by itself; otherwise Over-Under, matching
+    // madVR's top-and-bottom output.
+    static int Format3DFromName(string path, bool framePacking)
     {
         string n = Path.GetFileNameWithoutExtension(path);
-        return Regex.IsMatch(n, @"(?i)(^|[\W_])(h-?sbs|half-?sbs|f-?sbs|full-?sbs|sbs|side[\W_]?by[\W_]?side)([\W_]|$)") ? 1 : 2;
+        if (Regex.IsMatch(n, @"(?i)(^|[\W_])(h-?sbs|half-?sbs|f-?sbs|full-?sbs|sbs|side[\W_]?by[\W_]?side)([\W_]|$)")) return 1;
+        if (Regex.IsMatch(n, @"(?i)(^|[\W_])(h-?ou|half-?ou|f-?ou|full-?ou|ou|h-?tab|half-?tab|f-?tab|full-?tab|tab|top[\W_]?(and|&)?[\W_]?bottom|over[\W_]?under)([\W_]|$)")) return 2;
+        return framePacking ? 0 : 2;
     }
 
     // "1920x1080@23" on the display named by display.target (blank = primary). Returns a log line.
@@ -1384,9 +1475,9 @@ class ModeSwitchApp : ApplicationContext
 
     void FillMenu(ContextMenuStrip menu)
     {
-        string headerText = busy && pendingTarget != null
-            ? "Switching to " + ModeName(pendingTarget) + "..."
-            : string.Format("Mode: {0}{1}", ModeName(mode), rebootPending ? "  (reboot pending)" : "");
+        string headerText = busy && pendingRoom != null ? "Switching to the " + RoomName(pendingRoom) + " room..."
+            : busy && pendingTarget != null ? "Switching to " + ModeName(pendingTarget) + "..."
+            : string.Format("Mode: {0}, {1} room{2}", ModeName(mode), RoomName(room), rebootPending ? "  (reboot pending)" : "");
         var header = new ToolStripMenuItem(headerText);
         header.Enabled = false;
         menu.Items.Add(header);
@@ -1408,6 +1499,21 @@ class ModeSwitchApp : ApplicationContext
         var play3d = new ToolStripMenuItem(nowPlaying != null ? "Playing in 3D: " + nowPlaying : "Play 3D Blu-ray / 3D film...", null, (s, e) => Play3DFromMenu());
         play3d.Enabled = !busy && !playing;
         menu.Items.Add(play3d);
+        menu.Items.Add(new ToolStripSeparator());
+
+        var tvRoom = new ToolStripMenuItem("TV room", null, (s, e) => SwitchRoom("tv"));
+        tvRoom.Checked = room == "tv";
+        tvRoom.Enabled = !busy && !playing;
+        var theatreRoom = new ToolStripMenuItem("Theatre room", null, (s, e) => SwitchRoom("theatre"));
+        theatreRoom.Checked = room == "theatre";
+        theatreRoom.Enabled = !busy && !playing;
+        menu.Items.Add(tvRoom);
+        menu.Items.Add(theatreRoom);
+        var setup = new ToolStripMenuItem("Room setup");
+        setup.DropDownItems.Add(new ToolStripMenuItem("Check devices", null, (s, e) => CheckRoomDevices()));
+        setup.DropDownItems.Add(new ToolStripMenuItem("Pair TV (accept the prompt on the TV)", null, (s, e) => PairTv()));
+        setup.DropDownItems.Add(new ToolStripMenuItem("Subwoofer plug login...", null, (s, e) => AskTapoLogin()));
+        menu.Items.Add(setup);
         menu.Items.Add(new ToolStripSeparator());
 
         var refresh = new ToolStripMenuItem("Refresh rate");
@@ -1472,6 +1578,8 @@ class ModeSwitchApp : ApplicationContext
             OpenAsUser(cfg.Get("open.display", "ms-settings:display"))));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open config.ini", null, (s, e) => Process.Start("notepad.exe", cfg.Path)));
+        string localCfg = Path.Combine(exeDir, "config.local.ini");
+        if (File.Exists(localCfg)) menu.Items.Add(new ToolStripMenuItem("Open config.local.ini", null, (s, e) => Process.Start("notepad.exe", localCfg)));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (s, e) => { tray.Visible = false; Application.Exit(); }));
     }
 
@@ -1641,15 +1749,25 @@ class ModeSwitchApp : ApplicationContext
         var log = new StringBuilder();
         try
         {
+            if (room != "theatre")                                    // 3D only works on the projector
+            {
+                RunRoomSwitch("theatre");
+                WaitForProjector();
+            }
             if (mode != "3d") RunSwitch("3d", keepHags, false);
 
-            // Projector to 3D in the format this file needs (Side-by-Side files say so in the name).
-            int fmt = Format3DFromName(file);
+            // Projector: frame-packed 3D (ISO / MVC) is detected by the projector itself, so leave it on
+            // Auto; frame-compatible files (named SBS / OU / TAB) need 3D forced in the right format.
+            int fmt = Format3DFromName(file, cfg.GetBool("play3d.framepacking", false));
             bool pjOk;
-            string pjLine = ApplyProjector(Projector3D(fmt), true, out pjOk);
+            var pjWanted = fmt == 0
+                ? new List<KeyValuePair<uint, uint>> { new KeyValuePair<uint, uint>(Pj.ItemDisplaySelect, 0) }
+                : Projector3D(fmt);
+            string pjLine = ApplyProjector(pjWanted, true, out pjOk);
             if (pjLine != null) log.AppendLine(pjLine);
-            string pjNote = pjOk ? "Projector: 3D, " + (fmt == 1 ? "Side-by-Side" : "Over-Under")
-                                 : cfg.Get("reminder.3d", "Set the projector's 3D format to match the film.");
+            string pjNote = !pjOk ? cfg.Get("reminder.3d", "Set the projector's 3D format to match the film.")
+                          : fmt == 0 ? "Frame-packed 3D - the projector switches to 3D by itself"
+                          : "Projector: 3D, " + (fmt == 1 ? "Side-by-Side" : "Over-Under");
 
             string target = file;
             if (file.EndsWith(".iso", StringComparison.OrdinalIgnoreCase))
@@ -1733,7 +1851,9 @@ class ModeSwitchApp : ApplicationContext
         string stored = ReadReg("Mode");
         if (stored == null) return;
         stored = ParseMode(stored);
-        if (stored != mode) { mode = stored; UpdateIcon(); }
+        string storedRoom = ReadReg("Room");
+        storedRoom = storedRoom == "tv" || storedRoom == "theatre" ? storedRoom : room;
+        if (stored != mode || storedRoom != room) { mode = stored; room = storedRoom; UpdateIcon(); }
     }
 
     // ---- switching ----
@@ -1865,8 +1985,8 @@ class ModeSwitchApp : ApplicationContext
 
         // 3b. Sound preset. After HDR, because an HDR change re-negotiates the HDMI link, which can
         //     briefly reset the TV/receiver audio device.
-        string soundKey = cfg.Get("sound." + p, "");
-        if (soundKey.Length > 0) log.AppendLine(ApplySound(soundKey));
+        string soundLine = ApplyRoomSound(p);
+        if (soundLine != null) log.AppendLine(soundLine);
 
         // 3c. Anything the app can't do itself, e.g. the projector's 3D format for frame-compatible 3D.
         //     With network control, a different note (e.g. 3D: how the projector gets switched to 3D).
@@ -1921,6 +2041,508 @@ class ModeSwitchApp : ApplicationContext
         return log.ToString().TrimEnd();
     }
 
+    // ---- rooms ----
+    // TV: the LG TV on the PC's input; receiver, subwoofer plug and projector off.
+    // Theatre: receiver, subwoofer plug and projector on; TV off.
+    // Windows' display and default sound device follow, then the current mode's resolution, HDR
+    // and sound preset are applied for the display now in use. Independent of Movie/3D/Game.
+
+    // Sound preset for mode `p` in the current room: sound.<room>.<mode>, else sound.<mode>.
+    // "none" leaves sound alone. Returns a log line, or null if nothing is configured.
+    string ApplyRoomSound(string p)
+    {
+        string key = cfg.Get("sound." + room + "." + p, cfg.Get("sound." + p, ""));
+        if (key.Length == 0 || key.Equals("none", StringComparison.OrdinalIgnoreCase)) return null;
+        return ApplySound(key);
+    }
+
+    void SwitchRoom(string target)
+    {
+        if (busy) return;
+        busy = true;
+        pendingRoom = target;
+        UpdateIcon();
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            for (int i = 0; i < 150 && following; i++) System.Threading.Thread.Sleep(100);   // let a display correction finish
+            RunRoomSwitch(target);
+        });
+    }
+
+    // Runs a room switch on the calling (background) thread and updates the tray around it.
+    string RunRoomSwitch(string target)
+    {
+        busy = true;
+        pendingRoom = target;
+        Ui(delegate { UpdateIcon(); Notify("Switching to the " + RoomName(target) + " room...", false); });
+        string text;
+        try { text = DoRoomSwitch(target); }
+        catch (Exception ex) { text = "failed: " + ex.Message; }
+        Ui(delegate
+        {
+            busy = false;
+            pendingRoom = null;
+            UpdateIcon();
+            Notify(Summarize(text), IsProblem(text));
+        });
+        return text;
+    }
+
+    string DoRoomSwitch(string target)
+    {
+        var log = new StringBuilder();
+        bool theatre = target == "theatre";
+        string tvIp = cfg.Get("tv.ip", ""), avrIp = cfg.Get("avr.ip", ""), subIp = cfg.Get("sub.ip", "");
+        string pjIp = cfg.Get("projector.ip", ""), pjCom = cfg.Get("projector.community", "SONY");
+
+        // How long each step took, for the log file only (the notification stays short).
+        var timings = new List<string>();
+        var clock = Stopwatch.StartNew();
+        long lap = 0;
+        Action<string> timed = label => { long now = clock.ElapsedMilliseconds; timings.Add(string.Format("{0} {1:0.0}s", label, (now - lap) / 1000.0)); lap = now; };
+
+        // 1. Power on what the room needs. The projector first: it takes longest to warm up and
+        //    can do that while the receiver starts (or waits for the remote). Receiver before the
+        //    subwoofer, so the sub doesn't thump while the receiver's amp starts.
+        int waitSec = theatre ? 60 : 45;    // for the room's display to appear (projector warm-up)
+        if (theatre)
+        {
+            if (pjIp.Length > 0)
+            {
+                string line = ProjectorPower(pjIp, pjCom, true);
+                if (line.IndexOf("FAILED", StringComparison.Ordinal) >= 0) waitSec = 5;   // it won't be showing up
+                log.AppendLine(line);
+                timed("projector");
+            }
+            if (avrIp.Length > 0) { log.AppendLine(ReceiverOn(avrIp)); timed("receiver"); }
+        }
+        else if (tvIp.Length > 0) { log.AppendLine(TvOn(tvIp)); timed("tv on"); }
+
+        // 2. Windows: only the room's display, and its sound device as the default.
+        log.AppendLine(ShowRoomDisplay(cfg.Get("room." + target + ".display", theatre ? "SONY PJ, SONY AVSYSTEM" : "LG TV"), waitSec));
+        timed("display");
+
+        // The subwoofer after the picture is there, i.e. once the receiver is up (no thump).
+        if (theatre && subIp.Length > 0)
+        {
+            string e = Tapo.Switch(subIp, true);
+            log.AppendLine(e == null ? "Subwoofer: on" : "Subwoofer FAILED: " + e);
+            timed("subwoofer");
+        }
+        log.AppendLine(SetRoomAudio(cfg.Get("room." + target + ".audio", theatre ? "SONY AVSYSTEM" : "LG TV")));
+        timed("sound output");
+
+        // 3. Power off the other room. Subwoofer before the receiver, again against thumps.
+        if (theatre)
+        {
+            if (tvIp.Length > 0) { log.AppendLine(TvOff(tvIp)); timed("tv off"); }
+        }
+        else
+        {
+            if (subIp.Length > 0)
+            {
+                string e = Tapo.Switch(subIp, false);
+                log.AppendLine(e == null ? "Subwoofer: off" : "Subwoofer FAILED: " + e);
+            }
+            if (pjIp.Length > 0) log.AppendLine(ProjectorPower(pjIp, pjCom, false));
+            if (avrIp.Length > 0 && cfg.GetBool("room.tv.receiveroff", true))
+            {
+                string e = SonyAvr.SetPower(avrIp, false);
+                log.AppendLine(e == null ? "Receiver: off" : "Receiver FAILED: " + e);
+            }
+            timed("devices off");
+        }
+
+        room = target;
+        WriteReg("Room", room);
+
+        // 4. The current mode's resolution, HDR and sound for the display now in use.
+        string p = ParseMode(mode);
+        string res = cfg.Get("display." + p, "");
+        if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+        string herr = Disp.SetHdr(cfg.GetBool("hdr." + p, p == "game"));
+        if (herr != null) log.AppendLine(herr);
+        string soundLine = ApplyRoomSound(p);
+        if (soundLine != null) log.AppendLine(soundLine);
+        timed("mode settings");
+
+        string text = log.ToString().TrimEnd();
+        WriteLog("room " + target, text + string.Format("\ntook {0:0}s: {1}", clock.Elapsed.TotalSeconds, string.Join(", ", timings.ToArray())));
+        return text;
+    }
+
+    // ---- room devices ----
+    string TvKey()
+    {
+        string k = cfg.Get("tv.clientkey", "");
+        return k.Length > 0 ? k : ReadReg("TvClientKey");
+    }
+
+    // Connects to the TV (pairing on screen if there's no key yet). Returns null on success.
+    string OpenTv(LgTv tv, int pairWaitMs)
+    {
+        string stored = TvKey(), key;
+        string err = tv.Open(stored, pairWaitMs, out key);
+        if (err == null && key != null && key != stored) WriteReg("TvClientKey", key);
+        return err;
+    }
+
+    string TvOn(string ip)
+    {
+        string mac = cfg.Get("tv.mac", "");
+        try
+        {
+            // Off, or in "Active Standby" (network up, screen off): wake it, then wait for it to answer.
+            // After a longer spell off it can take well over 30 s until it answers on the network,
+            // though its picture comes up sooner - so give it 20 s, then carry on and select the
+            // input in the background (it usually comes back on the PC's input anyway).
+            string result, state = null;
+            var clock = Stopwatch.StartNew();
+            long nextWake = 0;
+            while (clock.ElapsedMilliseconds < 20000)
+            {
+                if (TvReady(ip, out result, ref state)) return result;
+                if (mac.Length == 0) return "TV FAILED: not on, and tv.mac isn't set to wake it";
+                if (clock.ElapsedMilliseconds >= nextWake)
+                {
+                    string werr = LgTv.Wake(mac, ip);
+                    if (werr != null) return "TV FAILED: " + werr;
+                    nextWake = clock.ElapsedMilliseconds + 5000;
+                }
+                System.Threading.Thread.Sleep(1000);
+            }
+
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                string line = null, st = state;
+                long next = 0;
+                while (clock.ElapsedMilliseconds < 120000)
+                {
+                    if (TvReady(ip, out line, ref st)) break;
+                    line = null;
+                    if (clock.ElapsedMilliseconds >= next) { LgTv.Wake(mac, ip); next = clock.ElapsedMilliseconds + 5000; }
+                    System.Threading.Thread.Sleep(2000);
+                }
+                WriteLog("tv input", line != null
+                    ? string.Format("{0} (answered after {1:0}s)", line, clock.Elapsed.TotalSeconds)
+                    : string.Format("TV didn't answer within {0:0}s (last state: {1}) - check General > Mobile TV On > Turn on via Wi-Fi", clock.Elapsed.TotalSeconds, st ?? "not reachable"));
+            });
+            return "TV: waking up (input selected when it answers)";
+        }
+        catch (Exception ex) { return "TV FAILED: " + ex.Message; }
+    }
+
+    // One attempt: if the TV is on and answering, select the PC's input. state = last power state seen.
+    bool TvReady(string ip, out string result, ref string state)
+    {
+        result = null;
+        try
+        {
+            if (!LgTv.IsUp(ip, 1000)) return false;
+            string input = cfg.Get("tv.input", "HDMI_1");
+            using (var tv = new LgTv(ip))
+            {
+                if (OpenTv(tv, 60000) != null) return false;
+                state = tv.PowerState() ?? state;
+                if (state != null && state != "Active") return false;
+                string e = input.Length > 0 ? tv.SwitchInput(input) : null;
+                result = e == null ? "TV: on" + (input.Length > 0 ? ", " + input : "") : "TV: on, but switching to " + input + " FAILED: " + e;
+                return true;
+            }
+        }
+        catch { return false; }
+    }
+
+    string TvOff(string ip)
+    {
+        try
+        {
+            if (!LgTv.IsUp(ip, 1500)) return "TV: off";
+            using (var tv = new LgTv(ip))
+            {
+                string err = OpenTv(tv, 5000);
+                if (err == null)
+                {
+                    string state = tv.PowerState();
+                    if (state != null && state != "Active") return "TV: off";
+                    err = tv.TurnOff();
+                }
+                return err == null ? "TV: off" : "TV FAILED: " + err;
+            }
+        }
+        catch (Exception ex) { return "TV FAILED: " + ex.Message; }
+    }
+
+    string ReceiverOn(string ip)
+    {
+        bool on;
+        string err = SonyAvr.GetPower(ip, out on);
+        if (err != null)
+        {
+            // Once switched off over the network it leaves the network too, and nothing (not even
+            // Wake-on-LAN) brings it back - so ask for the remote. Its picture and sound are up in
+            // seconds but its network takes over a minute, so don't hold the switch up for that:
+            // select the input in the background once it answers (it usually remembers it anyway).
+            Say("Switch the receiver on with the remote", false);
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool isOn;
+                string e = "not reachable";
+                for (int i = 0; i < 90 && e != null; i++)
+                {
+                    System.Threading.Thread.Sleep(2000);
+                    e = SonyAvr.GetPower(ip, out isOn);
+                }
+                string uri = cfg.Get("avr.input", "");
+                if (e == null && uri.Length > 0) e = SonyAvr.SetInput(ip, uri);
+                WriteLog("receiver input", e == null ? "Receiver: input " + cfg.Get("avr.inputname", uri) : "Receiver: input not set - " + e);
+            });
+            return "Receiver: switch on with the remote";
+        }
+        if (!on)
+        {
+            err = SonyAvr.SetPower(ip, true);
+            if (err != null) return "Receiver FAILED: " + err;
+            for (int i = 0; i < 20 && !on; i++) { System.Threading.Thread.Sleep(500); SonyAvr.GetPower(ip, out on); }
+        }
+        string input = cfg.Get("avr.input", "");
+        if (input.Length == 0) return "Receiver: on";
+        for (int i = 0; i < 6; i++)                          // the input can be refused while it boots
+        {
+            err = SonyAvr.SetInput(ip, input);
+            if (err == null) return "Receiver: on, input " + cfg.Get("avr.inputname", input);
+            System.Threading.Thread.Sleep(1000);
+        }
+        return "Receiver: on, but input FAILED: " + err;
+    }
+
+    // SDCP power: 0x0130 = set (1 on, 0 off); 0x0102 = status (0 standby, 1-2 starting, 3 on, 4+ cooling).
+    static string ProjectorPower(string ip, string com, bool on)
+    {
+        try
+        {
+            int status;
+            string err = Pj.Get(ip, com, Pj.ItemPower, out status);
+            if (err != null) return "Projector FAILED: " + err + (on ? " (projector setting: Remote Start / network standby on)" : "");
+            if (on && status >= 1 && status <= 3) return "Projector: on";
+            if (!on && (status == 0 || status >= 4)) return "Projector: off";
+            if (on && status >= 4)
+            {
+                // Still cooling down from being switched off: it only accepts "on" once in standby.
+                for (int i = 0; i < 120 && status >= 4; i++)
+                {
+                    System.Threading.Thread.Sleep(1000);
+                    if (Pj.Get(ip, com, Pj.ItemPower, out status) != null) break;
+                }
+            }
+            err = Pj.Set(ip, com, 0x0130, on ? 1 : 0);
+            if (err != null) return "Projector FAILED: power " + (on ? "on" : "off") + ": " + err;
+            return on ? "Projector: on (warming up)" : "Projector: off (cooling down)";
+        }
+        catch (Exception ex) { return "Projector FAILED: " + ex.Message; }
+    }
+
+    // A projector that was just switched on takes a minute or so to warm up and accept settings.
+    void WaitForProjector()
+    {
+        string ip = cfg.Get("projector.ip", ""), com = cfg.Get("projector.community", "SONY");
+        if (ip.Length == 0) return;
+        for (int i = 0; i < 120; i++)
+        {
+            int status;
+            if (Pj.Get(ip, com, Pj.ItemPower, out status) != null || status == 3 || status == 0 || status >= 4) return;
+            System.Threading.Thread.Sleep(1000);
+        }
+    }
+
+    // `names` = comma-separated preference list, e.g. "SONY PJ, SONY AVSYSTEM": the projector
+    // through the receiver, else the receiver's own screen. Waits up to waitSec for the first.
+    static string ShowRoomDisplay(string names, int waitSec)
+    {
+        try
+        {
+            string[] list = Array.ConvertAll(names.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries), s => s.Trim());
+            if (list.Length == 0) return null;
+            // The display appears once the TV / receiver has started and sent its EDID.
+            for (int i = 0; i < waitSec && !DispTopo.Available(list[0]); i++) System.Threading.Thread.Sleep(1000);
+            string pick = Array.Find(list, n => DispTopo.Available(n)) ?? list[0];
+            string shown;
+            string err = DispTopo.ShowOnly(pick, out shown);
+            if (err != null) return "Display FAILED: " + err;
+            System.Threading.Thread.Sleep(3000);                   // let the HDMI link settle
+            return "Display: " + shown + " only";
+        }
+        catch (Exception ex) { return "Display FAILED: " + ex.Message; }
+    }
+
+    // Windows remembers a layout per set of connected displays, so switching a device on by hand
+    // (or one finishing its start-up late) can bring back an old layout, e.g. "TV only" in the
+    // Theatre room. When the set of connected displays changes, put the room's display back.
+    // Only on a change, so a layout picked afterwards with Win+P is left alone.
+    string lastAvailable;
+    volatile bool following;             // a display-follow correction is running
+
+    void FollowRoomDisplay()
+    {
+        if (busy || following || playing || !cfg.GetBool("room.followdisplay", true)) return;
+        string now;
+        try { now = string.Join("|", DispTopo.AvailableNames().ToArray()); }
+        catch { return; }
+        if (lastAvailable == null || now == lastAvailable) { lastAvailable = now; return; }
+        lastAvailable = now;
+
+        string target = room, p = ParseMode(mode);
+        following = true;               // its own flag: `busy` belongs to mode/room switches and the icon
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            var log = new StringBuilder();
+            try
+            {
+                System.Threading.Thread.Sleep(4000);               // let Windows finish its own re-layout
+                string wanted = cfg.Get("room." + target + ".display", target == "theatre" ? "SONY PJ, SONY AVSYSTEM" : "LG TV");
+                string first = Array.Find(Array.ConvertAll(wanted.Split(','), s => s.Trim()), n => n.Length > 0 && DispTopo.Available(n));
+                if (first == null) return;
+                var active = DispTopo.Active();
+                if (active.Count == 1 && active[0].IndexOf(first, StringComparison.OrdinalIgnoreCase) >= 0) return;   // already right
+                log.AppendLine(ShowRoomDisplay(wanted, 0));
+                log.AppendLine(SetRoomAudio(cfg.Get("room." + target + ".audio", target == "theatre" ? "SONY AVSYSTEM" : "LG TV")));
+                string res = cfg.Get("display." + p, "");
+                if (res.Length > 0) log.AppendLine(ApplyResolution(res, cfg.Get("display.target", "")));
+                string soundLine = ApplyRoomSound(p);
+                if (soundLine != null) log.AppendLine(soundLine);
+            }
+            catch (Exception ex) { log.AppendLine("FAILED: " + ex.Message); }
+            finally
+            {
+                try { lastAvailable = string.Join("|", DispTopo.AvailableNames().ToArray()); } catch { }
+                following = false;
+            }
+            string text = log.ToString().TrimEnd();
+            if (text.Length == 0) return;
+            WriteLog("display follow (" + RoomName(target) + " room)", text);
+            Say(Summarize(text), IsProblem(text));
+        });
+    }
+
+    static string SetRoomAudio(string name)
+    {
+        try
+        {
+            string device = null, err = null;
+            for (int i = 0; i < 20; i++)                            // HDMI audio shows up after the display
+            {
+                err = Snd.SetDefaultOutput(name, out device);
+                if (err == null) return "Sound output: " + device;
+                System.Threading.Thread.Sleep(1000);
+            }
+            return "Sound output FAILED: " + err;
+        }
+        catch (Exception ex) { return "Sound output FAILED: " + ex.Message; }
+    }
+
+    // "Room setup > Pair TV": shows the TV's allow prompt and remembers the key.
+    void PairTv()
+    {
+        string ip = cfg.Get("tv.ip", "");
+        if (ip.Length == 0) { Notify("Set tv.ip in config.ini first", true); return; }
+        Notify("Accept the prompt on the TV to let ModeSwitch control it", false);
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            string text;
+            try
+            {
+                if (!LgTv.IsUp(ip, 2000)) text = "TV FAILED: not reachable at " + ip + " - is it on?";
+                else
+                    using (var tv = new LgTv(ip))
+                    {
+                        string key, err = tv.Open(null, 90000, out key);
+                        if (err == null && key != null) { WriteReg("TvClientKey", key); tv.Toast("ModeSwitch connected"); }
+                        text = err == null ? "TV paired" : "TV pairing FAILED: " + err;
+                    }
+            }
+            catch (Exception ex) { text = "TV pairing FAILED: " + ex.Message; }
+            WriteLog("pair tv", text);
+            Say(text, IsProblem(text));
+        });
+    }
+
+    // "Room setup > Subwoofer plug login": TP-Link account for the Tapo plug, stored encrypted.
+    void AskTapoLogin()
+    {
+        string oldUser, oldPass;
+        Tapo.LoadLogin(out oldUser, out oldPass);
+        using (var f = new Form { Text = "Subwoofer plug - TP-Link login", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+                                  StartPosition = FormStartPosition.CenterScreen, TopMost = true, ClientSize = new Size(380, 170), ShowInTaskbar = false })
+        {
+            var info = new Label { Text = "The e-mail and password of the TP-Link account the Tapo app uses.\nStored encrypted for this Windows user only.", Location = new Point(12, 10), Size = new Size(360, 34) };
+            var userLbl = new Label { Text = "E-mail", Location = new Point(12, 56), AutoSize = true };
+            var user = new TextBox { Location = new Point(90, 52), Width = 276, Text = oldUser ?? "" };
+            var passLbl = new Label { Text = "Password", Location = new Point(12, 88), AutoSize = true };
+            var pass = new TextBox { Location = new Point(90, 84), Width = 276, UseSystemPasswordChar = true };
+            var ok = new Button { Text = "Save", DialogResult = DialogResult.OK, Location = new Point(210, 128), Width = 75 };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(291, 128), Width = 75 };
+            f.Controls.AddRange(new Control[] { info, userLbl, user, passLbl, pass, ok, cancel });
+            f.AcceptButton = ok; f.CancelButton = cancel;
+            if (f.ShowDialog() != DialogResult.OK || user.Text.Trim().Length == 0 || pass.Text.Length == 0) return;
+            Tapo.SaveLogin(user.Text.Trim(), pass.Text);
+        }
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate { Say(CheckTapo(), false); });
+    }
+
+    string CheckTapo()
+    {
+        string ip = cfg.Get("sub.ip", "");
+        if (ip.Length == 0) return "Subwoofer: sub.ip not set";
+        string user, pass, name = null;
+        bool on = false;
+        if (!Tapo.LoadLogin(out user, out pass)) return "Subwoofer: no TP-Link login saved";
+        var t = new Tapo(ip);
+        string err = t.Login(user, pass) ?? t.GetInfo(out name, out on);
+        return err != null ? "Subwoofer FAILED: " + err : string.Format("Subwoofer plug '{0}': {1}", name, on ? "on" : "off");
+    }
+
+    // "Room setup > Check devices": reads every device's state, changes nothing.
+    void CheckRoomDevices()
+    {
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                string ip = cfg.Get("tv.ip", "");
+                if (ip.Length > 0)
+                {
+                    if (!LgTv.IsUp(ip, 1500)) sb.AppendLine("TV: off / not reachable");
+                    else using (var tv = new LgTv(ip))
+                    {
+                        string err = OpenTv(tv, 5000);
+                        sb.AppendLine(err != null ? "TV FAILED: " + err + " (Room setup > Pair TV)" : "TV: " + (tv.PowerState() ?? "on") + ", " + (tv.ForegroundApp() ?? "?"));
+                    }
+                }
+                ip = cfg.Get("avr.ip", "");
+                if (ip.Length > 0)
+                {
+                    bool on;
+                    string err = SonyAvr.GetPower(ip, out on);
+                    sb.AppendLine(err != null ? "Receiver FAILED: " + err : "Receiver: " + (on ? "on" : "standby"));
+                }
+                ip = cfg.Get("projector.ip", "");
+                if (ip.Length > 0)
+                {
+                    int status;
+                    string err = Pj.Get(ip, cfg.Get("projector.community", "SONY"), Pj.ItemPower, out status);
+                    sb.AppendLine(err != null ? "Projector FAILED: " + err
+                        : "Projector: " + (status == 3 ? "on" : status == 0 ? "standby" : status <= 2 ? "starting" : "cooling down"));
+                }
+                if (cfg.Get("sub.ip", "").Length > 0) sb.AppendLine(CheckTapo());
+            }
+            catch (Exception ex) { sb.AppendLine("check FAILED: " + ex.Message); }
+            string text = sb.ToString().TrimEnd();
+            WriteLog("check room devices", text);
+            Say(text, IsProblem(text));
+        });
+    }
+
     // ModeSwitch runs elevated, and Store apps and Settings pages don't launch reliably from an
     // elevated process. Explorer runs as the normal user, so let it open the target.
     void OpenAsUser(string target)
@@ -1950,12 +2572,16 @@ class ModeSwitchApp : ApplicationContext
     }
 
     // ---- icon ----
+    bool iconShowsBusy;
+
     void UpdateIcon()
     {
-        if (busy && pendingTarget != null)
+        iconShowsBusy = busy && (pendingTarget != null || pendingRoom != null);
+        if (iconShowsBusy)
         {
             tray.Icon = MakeIcon("", Color.FromArgb(255, 186, 8));   // sync glyph, amber
-            tray.Text = "ModeSwitch - switching to " + ModeName(pendingTarget) + "...";
+            tray.Text = pendingRoom != null ? "ModeSwitch - switching to the " + RoomName(pendingRoom) + " room..."
+                                            : "ModeSwitch - switching to " + ModeName(pendingTarget) + "...";
             return;
         }
         string glyph = mode == "game" ? "" : "";           // gamepad / video
@@ -1964,7 +2590,7 @@ class ModeSwitchApp : ApplicationContext
                      : mode == "3d"   ? Color.FromArgb(200, 140, 255)
                                       : Color.FromArgb(120, 180, 255);
         tray.Icon = mode == "3d" ? MakeTextIcon("3D", colour) : MakeIcon(glyph, colour);
-        tray.Text = string.Format("ModeSwitch - {0} mode{1}", ModeName(mode), rebootPending ? " (reboot pending)" : "");
+        tray.Text = string.Format("ModeSwitch - {0} mode, {1} room{2}", ModeName(mode), RoomName(room), rebootPending ? " (reboot pending)" : "");
     }
 
     static Icon MakeIcon(string glyph, Color colour)

@@ -16,7 +16,8 @@ $wm = Join-Path $env:WINDIR 'System32\WinMetadata'
 $winrt = @("$wm\Windows.Media.winmd", "$wm\Windows.Foundation.winmd", "$fw\System.Runtime.WindowsRuntime.dll", "$fw\System.Runtime.dll")
 
 $targets = @(
-  @{ Name = 'ModeSwitch'; Kind = 'winexe'; Refs = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll') + $winrt },
+  # Room.cs: TV / receiver / smart plug control (JSON via System.Web.Extensions, login storage via System.Security)
+  @{ Name = 'ModeSwitch'; Kind = 'winexe'; Refs = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.Security.dll') + $winrt; Extra = @('Room.cs') },
   @{ Name = 'NvProbe';    Kind = 'exe';    Refs = @() },
   @{ Name = 'NvClocks';   Kind = 'exe';    Refs = @() }
 )
@@ -26,6 +27,7 @@ foreach ($t in $targets) {
   $cscArgs = @('/nologo', "/target:$($t.Kind)", '/platform:x64', "/out:$bin\$($t.Name).exe")
   $cscArgs += $t.Refs | ForEach-Object { "/reference:$_" }
   $cscArgs += "$src\$($t.Name).cs"
+  if ($t.Extra) { $cscArgs += $t.Extra | ForEach-Object { "$src\$_" } }
   & $csc @cscArgs
   if ($LASTEXITCODE -eq 0) { Write-Host "built bin\$($t.Name).exe" -ForegroundColor Green }
   else { Write-Host "FAILED: $($t.Name)" -ForegroundColor Red; $failed = $true }
