@@ -81,8 +81,9 @@ sealed class RoomSoundMenu
         tvSlider.ValueChanged += (s, e) => { tvValue.Text = tvSlider.Value.ToString(); if (!loading) QueueTvVolume(); };
         avrSlider.ValueChanged += (s, e) => { avrValue.Text = avrSlider.Value.ToString(); if (!loading) QueueAvrVolume(); };
 
-        root.DropDownOpening += (s, e) => { Run(ReadTv); Run(ReadAvr); };
-        root.DropDownClosed += (s, e) => Run(() => { if (tv != null) { tv.Dispose(); tv = null; } });
+        // Each opening starts on a fresh TV connection (an old one may have been dropped by the TV).
+        root.DropDownOpening += (s, e) => { Run(DropTv); Run(ReadTv); Run(ReadAvr); };
+        root.DropDownClosed += (s, e) => Run(DropTv);
         return root;
     }
 
@@ -227,18 +228,33 @@ sealed class RoomSoundMenu
         return tv = t;
     }
 
-    // Runs a TV call, reconnecting once if the connection dropped. Shows a failure in the header.
-    bool TvCall(Func<LgTv, string> call, string what)
+    const string Unreachable = "off or not reachable";
+
+    void DropTv()
     {
-        string err = "off or not reachable";
+        if (tv != null) { tv.Dispose(); tv = null; }
+    }
+
+    // Runs a TV call, reconnecting once if the connection dropped. Returns null, else why it failed.
+    string TvTry(Func<LgTv, string> call)
+    {
+        string err = Unreachable;
         for (int attempt = 0; attempt < 2; attempt++)
         {
             LgTv t = Tv();
-            if (t == null) break;
+            if (t == null) { err = Unreachable; break; }
             err = call(t);
-            if (err == null) return true;
-            tv.Dispose(); tv = null;                             // stale connection: try a fresh one
+            if (err == null) return null;
+            DropTv();                                            // stale connection: try a fresh one
         }
+        return err;
+    }
+
+    // TvTry, showing a failure in the header.
+    bool TvCall(Func<LgTv, string> call, string what)
+    {
+        string err = TvTry(call);
+        if (err == null) return true;
         string msg = "TV: " + what + " failed - " + err;
         Ui(() => { if (tvHeader != null) tvHeader.Text = msg; });
         return false;
@@ -247,15 +263,17 @@ sealed class RoomSoundMenu
     void ReadTv()
     {
         if (tvIp().Length == 0) return;
-        LgTv t = Tv();
-        if (t == null) { Ui(() => SetTv(false, "TV: off or not reachable")); return; }
-        int vol; bool muted; string output;
-        string err = t.GetVolume(out vol, out muted);
-        t.GetSoundOutput(out output);
+        int vol = 0; bool muted = false; string output = null;
+        string err = TvTry(t =>
+        {
+            string e = t.GetVolume(out vol, out muted);
+            if (e == null) t.GetSoundOutput(out output);
+            return e;
+        });
         Ui(() =>
         {
             if (tvHeader == null) return;
-            if (err != null) { SetTv(false, "TV: volume unavailable - " + err); return; }
+            if (err != null) { SetTv(false, err == Unreachable ? "TV: " + Unreachable : "TV: volume unavailable - " + err); return; }
             loading = true;
             tvSlider.Value = Math.Max(0, Math.Min(100, vol));
             tvValue.Text = tvSlider.Value.ToString();

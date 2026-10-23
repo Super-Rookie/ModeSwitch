@@ -103,7 +103,8 @@ sealed class LgTv : IDisposable
             { "manifest", new Dictionary<string, object> { { "appVersion", "1.1" }, { "manifestVersion", 1 }, { "permissions", Permissions } } }
         };
         if (!string.IsNullOrEmpty(clientKey)) payload["client-key"] = clientKey;
-        Send(Json.Write(new Dictionary<string, object> { { "type", "register" }, { "id", "register_0" }, { "payload", payload } }));
+        try { Send(Json.Write(new Dictionary<string, object> { { "type", "register" }, { "id", "register_0" }, { "payload", payload } })); }
+        catch (Exception ex) { return "TV dropped the connection (" + Inner(ex).Message + ")"; }
 
         var until = DateTime.UtcNow.AddMilliseconds(Math.Max(pairWaitMs, 5000));
         while (DateTime.UtcNow < until)
