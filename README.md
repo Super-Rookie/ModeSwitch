@@ -46,6 +46,11 @@ Out of the box it adds:
   when the display named by `display.target` is connected, so nothing changes while you're on a TV.
 - **A reminder** (`reminder.3d`) to set the projector's 3D format with its remote, or, with network
   control, a note on how the projector gets switched to 3D (`reminder.3d.networked`).
+- **MPC-HC's video renderer to madVR** (`mpc.renderer.3d`, MPC-HC's renderer number: 12 = madVR,
+  14 = MPC Video Renderer, 0 = leave it alone). Leaving 3D puts back the renderer it had before,
+  unless it was changed by hand in the meantime. MPC-HC only reads its settings at start-up and
+  writes them all back when it closes, so if it's open at the switch, the change is made as soon as
+  it closes.
 
 Any Movie key can be given a `.3d` version to differ, e.g. `sound.3d = atmos-hometheater`.
 

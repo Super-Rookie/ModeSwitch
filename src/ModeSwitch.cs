@@ -1165,6 +1165,11 @@ class ModeSwitchApp : ApplicationContext
         {
             SyncStoredMode();
             KeepAppsClosed();
+            if (!busy)
+            {
+                string mpcLine = SyncMpcRenderer(ParseMode(mode), false);
+                if (mpcLine != null) WriteLog("mpc-hc renderer", mpcLine);
+            }
             FollowRoomDisplay();
             // Never leave the "switching" icon up once nothing is switching.
             if (!busy && iconShowsBusy) { pendingRoom = null; pendingTarget = null; UpdateIcon(); }
@@ -1880,6 +1885,9 @@ class ModeSwitchApp : ApplicationContext
                 log.AppendLine("mounted " + Path.GetFileName(file) + " as " + iso.Drive.TrimEnd('\\'));
             }
 
+            string rendererLine = SyncMpcRenderer("3d", true);         // in case MPC-HC was open at the switch
+            if (rendererLine != null) log.AppendLine(rendererLine);
+
             string player = PlayerPath();
             if (!File.Exists(player)) { Say("3D FAILED: player not found: " + player, true); log.AppendLine("player not found: " + player); return; }
             string args = "\"" + target + "\" " + cfg.Get("play3d.args", "/fullscreen /play");
@@ -1999,6 +2007,77 @@ class ModeSwitchApp : ApplicationContext
                 WriteLog("keep closed", "closed again in " + modeName + " mode (something restarted it): " + string.Join(", ", closed.ToArray()));
             keepClosedRunning = false;
         });
+    }
+
+    // ---- MPC-HC video renderer ----
+    // 3D Movie switches MPC-HC to madVR (mpc.renderer.3d: MPC-HC's renderer number, 12 = madVR,
+    // 14 = MPC Video Renderer, 0 = leave it alone); leaving 3D puts back what it was, unless it has
+    // been changed by hand since. MPC-HC reads its settings when it starts and writes them all back
+    // when it closes, so the change is only made while it isn't running; the sync tick makes it
+    // once MPC-HC has closed. report = say so when it has to wait.
+    const string MpcKey = @"Software\MPC-HC\MPC-HC\Settings";
+    const string MpcSaved = "MpcRendererBefore3D";
+
+    string SyncMpcRenderer(string p, bool report)
+    {
+        int want3d = cfg.GetInt("mpc.renderer.3d", 12);
+        bool in3d = p == "3d" && want3d > 0;
+        string saved = ReadReg(MpcSaved);
+        if (!in3d && saved == null) return null;                         // nothing to set or put back
+        try
+        {
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(MpcKey, true))
+            {
+                if (k == null) return null;                               // MPC-HC hasn't stored settings here
+                object v = k.GetValue("DSVidRen");
+                int now = v is int ? (int)v : -1;
+                int back;
+                bool restore = !in3d && int.TryParse(saved, out back) && back >= 0 && now == want3d;
+                if (in3d ? now == want3d : !restore)
+                {
+                    if (!in3d) DeleteReg(MpcSaved);                       // changed by hand since: keep that
+                    return null;
+                }
+                int to = in3d ? want3d : int.Parse(saved, CultureInfo.InvariantCulture);
+                if (MpcRunning())
+                    return report ? "MPC-HC renderer: " + MpcRendererName(to) + " once MPC-HC is closed" : null;
+                if (in3d && saved == null) WriteReg(MpcSaved, now.ToString(CultureInfo.InvariantCulture));
+                k.SetValue("DSVidRen", to, RegistryValueKind.DWord);
+                if (!in3d) DeleteReg(MpcSaved);
+                return "MPC-HC renderer: " + MpcRendererName(to) + (in3d ? " (was " + MpcRendererName(now) + ")" : " (back from 3D)");
+            }
+        }
+        catch (Exception ex) { return "MPC-HC renderer: " + ex.Message; }
+    }
+
+    static bool MpcRunning()
+    {
+        foreach (string n in new[] { "mpc-hc64", "mpc-hc" })
+        {
+            Process[] ps = Process.GetProcessesByName(n);
+            foreach (Process x in ps) x.Dispose();
+            if (ps.Length > 0) return true;
+        }
+        return false;
+    }
+
+    static string MpcRendererName(int id)
+    {
+        switch (id)
+        {
+            case 10: return "EVR";
+            case 11: return "EVR Custom";
+            case 12: return "madVR";
+            case 13: return "Sync Renderer";
+            case 14: return "MPC Video Renderer";
+            default: return id < 0 ? "default" : "renderer " + id;
+        }
+    }
+
+    static void DeleteReg(string name)
+    {
+        try { using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RegKey, true)) if (k != null) k.DeleteValue(name, false); }
+        catch { }
     }
 
     // ---- switching ----
@@ -2183,6 +2262,10 @@ class ModeSwitchApp : ApplicationContext
             }
             catch (Exception ex) { log.AppendLine("GPU scheduling: " + ex.Message + " (run elevated)"); }
         }
+
+        // 6. MPC-HC's video renderer (madVR in 3D Movie, back to what it was otherwise).
+        string mpcLine = SyncMpcRenderer(p, true);
+        if (mpcLine != null) log.AppendLine(mpcLine);
 
         mode = target;
         StoreMode();
