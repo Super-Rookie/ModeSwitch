@@ -45,14 +45,22 @@ sealed class StereoMirror : IDisposable
                 int halfW = screen.Width / 2;
                 at = new Point(screen.X + eye * halfW + (halfW - half.Width) / 2, screen.Y + (screen.Height - half.Height) / 2);
             }
-            var m = new Mirror(this) { Location = at, Size = half };
+            var m = new Mirror(this) { Location = at, Size = half, Opacity = source.Opacity };
             copies[eye] = m;
         }
 
         source.Location = new Point(-20000, -20000);     // still open and focusable, just not visible
         Capture();
         foreach (var m in copies) m.Show();
-        timer.Tick += (s, e) => { Capture(); foreach (var m in copies) m.Invalidate(); };
+        timer.Tick += (s, e) =>
+        {
+            Capture();
+            foreach (var m in copies)
+            {
+                if (m.Opacity != source.Opacity) m.Opacity = source.Opacity;   // follows "See-through"
+                m.Invalidate();
+            }
+        };
         timer.Start();
     }
 
