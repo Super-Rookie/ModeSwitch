@@ -28,6 +28,11 @@ video playback. Instead of changing half a dozen settings by hand every time, th
 
 Every value is set in `bin\config.ini`, so the presets can be changed without rebuilding.
 
+In Movie mode, Afterburner and RTSS stay closed: if anything starts them again (typically
+Afterburner's own logon task right after a reboot, which brings RTSS back and lets it hook the
+video player), ModeSwitch closes them within a few seconds and notes it in the log. Set
+`apps.movie.keepclosed = false` to allow them.
+
 ## 3D Movie mode
 
 A third mode, chosen from the right-click menu like the others. It shows a purple **3D** icon.

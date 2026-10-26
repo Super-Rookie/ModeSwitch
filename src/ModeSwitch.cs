@@ -1164,6 +1164,7 @@ class ModeSwitchApp : ApplicationContext
         sync.Tick += (s, e) =>
         {
             SyncStoredMode();
+            KeepAppsClosed();
             FollowRoomDisplay();
             // Never leave the "switching" icon up once nothing is switching.
             if (!busy && iconShowsBusy) { pendingRoom = null; pendingTarget = null; UpdateIcon(); }
@@ -1953,6 +1954,51 @@ class ModeSwitchApp : ApplicationContext
         string storedRoom = ReadReg("Room");
         storedRoom = storedRoom == "tv" || storedRoom == "theatre" ? storedRoom : room;
         if (stored != mode || storedRoom != room) { mode = stored; room = storedRoom; UpdateIcon(); }
+    }
+
+    // Movie mode closes Afterburner and RTSS, but after a reboot Afterburner's own logon task can
+    // start them again moments after the startup re-apply, and RTSS then hooks the video player.
+    // While the mode wants them closed, close them again whenever they reappear. Only apps that
+    // have run for a while are closed, so an Afterburner started by a switch (even one run from
+    // another process with --apply) gets to apply its profile first.
+    // apps.<mode>.keepclosed = false turns this off.
+    volatile bool keepClosedRunning;
+
+    void KeepAppsClosed()
+    {
+        if (busy || keepClosedRunning) return;
+        string p = ParseMode(mode);
+        if (!cfg.GetBool("apps." + p + ".keepclosed", true)) return;
+        var names = new List<string>();
+        foreach (string n in cfg.Get("apps." + p + ".stop", "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            if (n.Trim().Length > 0) names.Add(n.Trim());
+        if (cfg.GetBool("ab." + p + ".stopafter", p != "game")) names.Add("MSIAfterburner");
+
+        var due = new List<Process>();
+        foreach (string n in names)
+            foreach (Process proc in Process.GetProcessesByName(n))
+            {
+                bool old;
+                try { old = (DateTime.Now - proc.StartTime).TotalSeconds > 20; } catch { old = false; }
+                if (old) due.Add(proc); else proc.Dispose();
+            }
+        if (due.Count == 0) return;
+
+        keepClosedRunning = true;
+        string modeName = ModeName(p);
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            var closed = new List<string>();
+            foreach (Process proc in due)
+            {
+                try { string n = proc.ProcessName; proc.Kill(); proc.WaitForExit(5000); if (!closed.Contains(n)) closed.Add(n); }
+                catch { }
+                finally { proc.Dispose(); }
+            }
+            if (closed.Count > 0)
+                WriteLog("keep closed", "closed again in " + modeName + " mode (something restarted it): " + string.Join(", ", closed.ToArray()));
+            keepClosedRunning = false;
+        });
     }
 
     // ---- switching ----
