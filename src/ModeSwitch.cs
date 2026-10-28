@@ -2853,8 +2853,14 @@ class ModeSwitchApp : ApplicationContext
                     using (var tv = new LgTv(ip))
                     {
                         string key, err = tv.Open(null, 90000, out key);
+                        // Some TVs (e.g. the C6) leave the key out of the reply that follows the prompt,
+                        // but send it on the next connection, now that they trust this PC.
+                        if (err == null && key == null)
+                            using (var again = new LgTv(ip)) err = again.Open(null, 10000, out key);
                         if (err == null && key != null) { WriteReg("TvClientKey", key); tv.Toast("ModeSwitch connected"); }
-                        text = err == null ? "TV paired" : "TV pairing FAILED: " + err;
+                        text = err != null ? "TV pairing FAILED: " + err
+                             : key == null ? "TV pairing FAILED: the TV accepted but sent no pairing key"
+                             : "TV paired";
                     }
             }
             catch (Exception ex) { text = "TV pairing FAILED: " + ex.Message; }

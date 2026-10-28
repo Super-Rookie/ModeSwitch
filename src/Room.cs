@@ -57,6 +57,10 @@ sealed class LgTv : IDisposable
 
     static LgTv()
     {
+        // Newer TVs (e.g. the C6) close port 3000 and need TLS 1.2+ on 3001, which a .NET Framework
+        // app built without a config file doesn't offer by default (SSL 3 / TLS 1.0 only).
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12 | (SecurityProtocolType)12288;   // 12288 = TLS 1.3
+
         // Port 3001 uses the TV's self-signed certificate. Accept it for LG TV connections only.
         ServicePointManager.ServerCertificateValidationCallback += (sender, cert, chain, errors) =>
         {
