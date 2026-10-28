@@ -137,8 +137,8 @@ place and a projector, AV receiver and subwoofer in another:
 
 After the devices, the current mode's resolution, HDR and sound preset are applied for the display
 now in use, with `sound.<room>.<mode>` (e.g. `sound.tv.movie`) overriding `sound.<mode>`, and
-`display.<room>.<mode>` overriding `display.<mode>` (Game on the TV runs at 120 Hz:
-`display.tv.game = @120`; LG TVs also offer 144/165 Hz with Game Optimizer turned on). Also `ModeSwitch.exe --room tv|theatre`.
+`display.<room>.<mode>` overriding `display.<mode>` (Game on the TV runs at 144 Hz:
+`display.tv.game = @144`; LG TVs offer 144/165 Hz with Game Optimizer turned on). Also `ModeSwitch.exe --room tv|theatre`.
 
 3D only works on the projector. In the TV room, **3D Movie mode** and **Play 3D…** are greyed
 out in the menu. Switching to the TV room while in 3D Movie mode goes back to Movie.
