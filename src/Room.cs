@@ -265,6 +265,36 @@ sealed class LgTv : IDisposable
         return Call("ssap://audio/changeSoundOutput", new Dictionary<string, object> { { "output", output } }, out r);
     }
 
+    // ---- picture ----
+    // Picture mode, e.g. "game" (Game Optimizer), "filmMaker", "cinema", "expert1", "expert2".
+    // Newer TVs refuse picture settings over SSAP, so this goes through the TV's settings service
+    // instead: a notification whose close action makes the settings call, closed straight away
+    // (the method LG control libraries such as bscpylgtv use). It applies to the current input and
+    // signal type (SDR or HDR), and the TV doesn't confirm it.
+    public string SetPictureMode(string mode)
+    {
+        var call = new Dictionary<string, object>
+        {
+            { "uri", "luna://com.webos.settingsservice/setSystemSettings" },
+            { "params", new Dictionary<string, object> { { "category", "picture" }, { "settings", new Dictionary<string, object> { { "pictureMode", mode } } } } }
+        };
+        var alert = new Dictionary<string, object>
+        {
+            { "message", " " },
+            { "buttons", new object[] { new Dictionary<string, object> { { "label", "" }, { "onClick", call["uri"] }, { "params", call["params"] } } } },
+            { "onclose", call },
+            { "onfail", call },
+            { "type", "confirm" },
+            { "isSysReq", true }
+        };
+        Dictionary<string, object> r;
+        string err = Call("ssap://system.notifications/createAlert", alert, out r);
+        if (err != null) return err;
+        string id = Json.Get(r, "alertId") as string;
+        if (id == null) return "the TV gave no notification id";
+        return Call("ssap://system.notifications/closeAlert", new Dictionary<string, object> { { "alertId", id } }, out r);
+    }
+
     // appId of what's on screen, e.g. "com.webos.app.hdmi2"
     public string ForegroundApp()
     {

@@ -2263,6 +2263,13 @@ class ModeSwitchApp : ApplicationContext
             catch (Exception ex) { log.AppendLine("GPU scheduling: " + ex.Message + " (run elevated)"); }
         }
 
+        // 5b. The TV's picture mode (Game Optimizer / Filmmaker), in the TV room.
+        if (room == "tv")
+        {
+            string picLine = ApplyTvPicture(p);
+            if (picLine != null) log.AppendLine(picLine);
+        }
+
         // 6. MPC-HC's video renderer (madVR in 3D Movie, back to what it was otherwise).
         string mpcLine = SyncMpcRenderer(p, true);
         if (mpcLine != null) log.AppendLine(mpcLine);
@@ -2519,6 +2526,11 @@ class ModeSwitchApp : ApplicationContext
         ApplyGpuColour(p, log);
         string soundLine = ApplyRoomSound(p);
         if (soundLine != null) log.AppendLine(soundLine);
+        if (!theatre)
+        {
+            string picLine = ApplyTvPicture(p);           // skipped while the TV is still waking up (done then)
+            if (picLine != null) log.AppendLine(picLine);
+        }
         timed("mode settings");
 
         // The mode's projector preset once it has warmed up (it refuses settings until then).
@@ -2583,7 +2595,15 @@ class ModeSwitchApp : ApplicationContext
                 long next = 0;
                 while (clock.ElapsedMilliseconds < 120000)
                 {
-                    if (TvReady(ip, out line, ref st)) break;
+                    if (TvReady(ip, out line, ref st))
+                    {
+                        if (room == "tv")
+                        {
+                            string pic = ApplyTvPicture(ParseMode(mode));
+                            if (pic != null) line += "\n" + pic;
+                        }
+                        break;
+                    }
                     line = null;
                     if (clock.ElapsedMilliseconds >= next) { LgTv.Wake(mac, ip); next = clock.ElapsedMilliseconds + 5000; }
                     System.Threading.Thread.Sleep(2000);
@@ -2616,6 +2636,42 @@ class ModeSwitchApp : ApplicationContext
             }
         }
         catch { return false; }
+    }
+
+    // The TV's picture mode for a mode (tv.picture.<mode>; TV room only): Game Optimizer for Game,
+    // Filmmaker for Movie by default. Values: game (Game Optimizer), filmMaker, cinema, expert1
+    // (Expert, bright room), expert2 (Expert, dark room), standard, vivid, eco, sports; empty =
+    // leave it alone. The TV keeps picture modes per input and per SDR/HDR, so this runs after the
+    // input and HDR are set. Returns a log line, or null when there's nothing to do / the TV is off.
+    string ApplyTvPicture(string p)
+    {
+        string ip = cfg.Get("tv.ip", "");
+        string want = cfg.Get("tv.picture." + p, p == "game" ? "game" : "filmMaker");
+        if (ip.Length == 0 || want.Length == 0 || !LgTv.IsUp(ip, 1500)) return null;
+        try
+        {
+            System.Threading.Thread.Sleep(2000);          // let the TV settle on the new signal (HDR on/off) first
+            using (var tv = new LgTv(ip))
+            {
+                string err = OpenTv(tv, 5000);
+                if (err == null) err = tv.SetPictureMode(want);
+                return err == null ? "TV picture mode: " + PictureModeName(want) : "TV picture mode FAILED: " + err;
+            }
+        }
+        catch (Exception ex) { return "TV picture mode FAILED: " + ex.Message; }
+    }
+
+    static string PictureModeName(string m)
+    {
+        switch (m)
+        {
+            case "game": return "Game Optimizer";
+            case "filmMaker": return "Filmmaker";
+            case "cinema": return "Cinema";
+            case "expert1": return "Expert (bright room)";
+            case "expert2": return "Expert (dark room)";
+            default: return m;
+        }
     }
 
     string TvOff(string ip)
