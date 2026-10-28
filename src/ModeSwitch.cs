@@ -2610,7 +2610,7 @@ class ModeSwitchApp : ApplicationContext
                 }
                 WriteLog("tv input", line != null
                     ? string.Format("{0} (answered after {1:0}s)", line, clock.Elapsed.TotalSeconds)
-                    : string.Format("TV didn't answer within {0:0}s (last state: {1}) - check General > Mobile TV On > Turn on via Wi-Fi", clock.Elapsed.TotalSeconds, st ?? "not reachable"));
+                    : string.Format("TV didn't answer within {0:0}s (last state: {1}) - check the TV has Wake on LAN on (IP Control settings, or General > Mobile TV On > Turn on via Wi-Fi)",clock.Elapsed.TotalSeconds, st ?? "not reachable"));
             });
             return "TV: waking up (input selected when it answers)";
         }

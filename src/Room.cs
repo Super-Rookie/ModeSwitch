@@ -36,7 +36,8 @@ static class Json
 // The webOS "SSAP" API: JSON over a websocket on port 3000 (3001 with TLS on newer firmware).
 // The first connection shows an "allow this device?" prompt on the TV; accepting it returns a
 // client key, and later connections that present the key are let in without asking.
-// Powering on needs Wake-on-LAN ("Mobile TV On > Turn on via Wi-Fi" on the TV).
+// Powering on needs Wake-on-LAN on the TV ("IP Control settings > Wake on LAN", or
+// "Mobile TV On > Turn on via Wi-Fi" on older models).
 sealed class LgTv : IDisposable
 {
     readonly string ip;
