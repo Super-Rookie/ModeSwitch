@@ -162,6 +162,7 @@ waking. Each switch logs per-step timings, e.g.
 | Sony receiver (STR-DN1080) | Sony Audio Control API: JSON-RPC over HTTP, port 10000 | Needs **Network Settings → External Control: On**. It accepts only `setPowerStatus` `off` (`standby` is refused). To be switched back on over the network it needs **Network Standby** and **Remote Start**. UK/EU models hide both from their setup menu, but the API still has them (`system/getPowerSettings`: `quickStartMode` and `wolMode`). ModeSwitch turns them on whenever it reaches the receiver. With them on, it stays reachable in standby and comes on in about 2 s. Without them, it drops off the network when off, and Wake-on-LAN doesn't wake it. The Theatre switch then asks for the remote, carries on, and selects the PC input in the background once the receiver's network is back (over a minute). |
 | Sony projector | PJ Talk / SDCP, TCP 53484 | Power item `0x0130` (1 on, 0 off), status `0x0102`. It stays reachable in standby. |
 | TP-Link Tapo plug | KLAP (handshake, then AES-encrypted requests) | Enter the TP-Link account login once from **Room setup → Subwoofer plug login…**. It's stored DPAPI-encrypted in `HKCU\Software\ModeSwitch`, readable only by that Windows user, never in a file. |
+| Philips Hue bridge | Hue REST API v1 over HTTP | Press the bridge's button, then **Room setup → Pair Hue bridge** within 30 s. The first pairing saves the lights in `hue.tv.group` as they are; **Room setup → Save Hue lights for the TV room** saves them again later. They're kept as a scene called "ModeSwitch TV" on the bridge and recalled when switching from Theatre to TV. |
 
 Windows remembers a display layout for each combination of connected displays, so switching a
 device on by hand can bring back an old layout, e.g. "TV only" in the Theatre room. With
@@ -356,6 +357,12 @@ anything by itself, so a stray click can't change modes (and GPU scheduling) by 
   - Movie mode / 3D Movie mode / Game mode
   - **Play 3D Blu-ray / 3D film…**
   - **TV room** / **Theatre room**
+  - **Shortcuts**, above Exit: any items you tick in **Edit shortcuts...**, from any submenu, one
+    click away. They're stored in `HKCU\Software\ModeSwitch`.
+  - **Lights**: for the Hue room or zone in `hue.tv.group`: a brightness slider for the lights
+    that are on, on/off, a **Scenes** submenu, and a submenu for each light with on/off, a colour
+    picker and shades of white (whichever the light supports), read from the bridge when the
+    submenu opens.
   - **Volume**: sliders for the TV and receiver volume, right in the menu, with a clickable scale
     in steps of 5 under each. Also mute for both, and the TV's sound output (TV speakers / wired
     headphones), listed directly under a heading. Levels are read in the background when the
@@ -381,7 +388,7 @@ Afterburner curve and Windows HDR do not survive a reboot on their own.
 ## Configuration (`bin\config.ini`)
 
 Keys in `bin\config.local.ini`, if present, override `config.ini`. Put your own network details
-there: `projector.ip`, `tv.ip`, `tv.mac`, `avr.ip`, `sub.ip`. It's in `.gitignore`, so they stay
+there: `projector.ip`, `tv.ip`, `tv.mac`, `avr.ip`, `sub.ip`, `hue.ip`. It's in `.gitignore`, so they stay
 out of source control, and `config.ini` ships with them blank:
 
 ```ini
@@ -390,6 +397,7 @@ tv.ip        = 192.168.1.51
 tv.mac       = AA-BB-CC-DD-EE-FF
 avr.ip       = 192.168.1.52
 sub.ip       = 192.168.1.53
+hue.ip       = 192.168.1.54
 ```
 
 Pairing keys and the Tapo login are kept in the registry (`HKCU\Software\ModeSwitch`), never in
@@ -423,6 +431,7 @@ these files.
 | `avr.ip`, `avr.input`, `avr.inputname` | receiver address, the PC's input (`extInput:bd-dvd`), and its name for messages |
 | `avr.volume.max` | highest receiver volume the menu slider allows (blank = the receiver's own maximum) |
 | `sub.ip` | the subwoofer's Tapo plug |
+| `hue.ip`, `hue.tv.group` | Hue bridge address, and the room or zone whose lights are recalled when switching from Theatre to TV (blank = leave them alone) |
 | `sound.<room>.<mode>` | sound preset for that mode in that room; `none` = leave sound alone |
 | `display.target` | part of the display's name the resolution keys apply to (blank = primary display) |
 | `display.<mode>` | resolution and refresh for that mode, e.g. `1920x1080@23`; skipped if the display isn't connected |
@@ -528,6 +537,7 @@ no SDK or Visual Studio is needed. The source avoids C# 6+ syntax for that reaso
 | `src\ModeSwitch.cs` | the tray app |
 | `src\Room.cs` | TV / receiver / Tapo plug control, and which display Windows uses |
 | `src\RoomSound.cs` | the Volume submenu |
+| `src\HueMenu.cs` | the Lights submenu |
 | `src\Picture.cs` | projector picture items, and GPU colour (gamma ramp, vibrance, hue) |
 | `src\Settings.cs` | the Settings window |
 | `src\NvProbe.cs` | read-only dump of sync-related NVIDIA driver profile settings |

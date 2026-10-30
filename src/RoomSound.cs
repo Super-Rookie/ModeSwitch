@@ -87,14 +87,25 @@ sealed class RoomSoundMenu
         return root;
     }
 
-    static ToolStripMenuItem Header(string text)
+    internal static ToolStripMenuItem Header(string text)
     {
-        return new ToolStripMenuItem(text) { Enabled = false };
+        return new ToolStripMenuItem(text) { Enabled = false, Tag = ModeSwitchApp.NoShortcut };
     }
+
+    // For a shortcut: reads the levels the submenu shows when it opens, then calls done on the UI thread.
+    public void Load(Action done)
+    {
+        Run(DropTv);
+        Run(ReadTv);
+        Run(ReadAvr);
+        Run(() => Ui(done));
+    }
+
+    public void Release() { Run(DropTv); }
 
     // A slider with its value, hosted as a menu row, and under it a scale with a notch every 5.
     // Clicking the scale jumps to the nearest notch.
-    static ToolStripControlHost SliderRow(out TrackBar slider, out Label value, int min, int max)
+    internal static ToolStripControlHost SliderRow(out TrackBar slider, out Label value, int min, int max)
     {
         var panel = new Panel { Size = new Size(360, 52), BackColor = SystemColors.Menu, Margin = Padding.Empty };
         var tb = new TrackBar { AutoSize = false, Location = new Point(4, 2), Size = new Size(306, 28), Minimum = min, Maximum = max,

@@ -1146,6 +1146,7 @@ class ModeSwitchApp : ApplicationContext
         tray.Visible = true;
         roomSound = new RoomSoundMenu(() => cfg.Get("tv.ip", ""), () => cfg.Get("avr.ip", ""), () => cfg.GetInt("avr.volume.max", 0),
                                       t => OpenTv(t, 5000), syncCtl);
+        hueMenu = new HueMenu(() => cfg.Get("hue.ip", ""), () => ReadReg("HueKey"), () => cfg.Get("hue.tv.group", "Bedroom"), syncCtl);
         // Left-click opens the same menu as right-click. Nothing switches on a click by itself, so a
         // stray click can't change modes (and GPU scheduling) by accident. NotifyIcon only opens
         // its menu on right-click; its private ShowContextMenu positions it the same way.
@@ -1540,7 +1541,7 @@ class ModeSwitchApp : ApplicationContext
         string headerText = busy && pendingRoom != null ? "Switching to the " + RoomName(pendingRoom) + " room..."
             : busy && pendingTarget != null ? "Switching to " + ModeName(pendingTarget) + "..."
             : string.Format("Mode: {0}, {1} room{2}", ModeName(mode), RoomName(room), rebootPending ? "  (reboot pending)" : "");
-        var header = new ToolStripMenuItem(headerText);
+        var header = new ToolStripMenuItem(headerText) { Tag = NoShortcut };
         header.Enabled = false;
         menu.Items.Add(header);
         menu.Items.Add(new ToolStripSeparator());
@@ -1574,6 +1575,7 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(tvRoom);
         menu.Items.Add(theatreRoom);
         if (roomSound != null) menu.Items.Add(roomSound.Build());
+        if (hueMenu != null) menu.Items.Add(hueMenu.Build());
         var setup = new ToolStripMenuItem("Room setup");
         var subwoofer = new ToolStripMenuItem(SubwooferLabel(), null, (s, e) => ToggleSubwoofer());
         subwoofer.Checked = subState == 1;
@@ -1583,7 +1585,10 @@ class ModeSwitchApp : ApplicationContext
         setup.DropDownItems.Add(new ToolStripSeparator());
         setup.DropDownItems.Add(new ToolStripMenuItem("Check devices", null, (s, e) => CheckRoomDevices()));
         setup.DropDownItems.Add(new ToolStripMenuItem("Pair TV (accept the prompt on the TV)", null, (s, e) => PairTv()));
-        setup.DropDownItems.Add(new ToolStripMenuItem("Subwoofer plug login...", null, (s, e) => AskTapoLogin()));        menu.Items.Add(setup);
+        setup.DropDownItems.Add(new ToolStripMenuItem("Subwoofer plug login...", null, (s, e) => AskTapoLogin()));
+        setup.DropDownItems.Add(new ToolStripMenuItem("Pair Hue bridge (press its button first)", null, (s, e) => PairHue()));
+        setup.DropDownItems.Add(new ToolStripMenuItem("Save Hue lights for the TV room", null, (s, e) => SaveHueLights()));
+        menu.Items.Add(setup);
         menu.Items.Add(new ToolStripSeparator());
 
         var refresh = new ToolStripMenuItem("Refresh rate");
@@ -1604,7 +1609,7 @@ class ModeSwitchApp : ApplicationContext
             }
             refresh.DropDownItems.Add(sub);
         }
-        if (refresh.DropDownItems.Count == 0) refresh.Enabled = false;
+        if (refresh.DropDownItems.Count == 0) { refresh.Enabled = false; refresh.Tag = NoShortcut; }
         menu.Items.Add(refresh);
 
         var targets = Disp.Targets();
@@ -1630,11 +1635,11 @@ class ModeSwitchApp : ApplicationContext
         }
         foreach (var t in targets.FindAll(x => !x.HdrCapable))
         {
-            var item = new ToolStripMenuItem(t.Name + " - no HDR support");
+            var item = new ToolStripMenuItem(t.Name + " - no HDR support") { Tag = NoShortcut };
             item.Enabled = false;
             hdr.DropDownItems.Add(item);
         }
-        if (hdr.DropDownItems.Count == 0) hdr.Enabled = false;
+        if (hdr.DropDownItems.Count == 0) { hdr.Enabled = false; hdr.Tag = NoShortcut; }
         menu.Items.Add(hdr);
         menu.Items.Add(BuildSoundMenu());
         var pjMenu = BuildProjectorMenu();
@@ -1651,7 +1656,144 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("Open config.ini", null, (s, e) => Process.Start("notepad.exe", cfg.Path)));
         string localCfg = Path.Combine(exeDir, "config.local.ini");
         if (File.Exists(localCfg)) menu.Items.Add(new ToolStripMenuItem("Open config.local.ini", null, (s, e) => Process.Start("notepad.exe", localCfg)));
-        menu.Items.Add(new ToolStripMenuItem("Exit", null, (s, e) => { tray.Visible = false; Application.Exit(); }));
+        AddShortcuts(menu);
+        menu.Items.Add(new ToolStripMenuItem("Exit", null, (s, e) => { tray.Visible = false; Application.Exit(); }) { Tag = NoShortcut });
+    }
+
+    // ---- shortcuts: any menu item, one click away ----
+    // Stored by the item's path in the menu, one per line, parts separated by tabs. The menu is
+    // rebuilt on every opening, so a shortcut builds a fresh copy and clicks the item in that: the
+    // same code runs as from the submenu, with the state as it is now.
+    internal const string NoShortcut = "noshortcut";     // Tag of menu items that aren't actions
+
+    static List<string> ReadShortcuts()
+    {
+        return new List<string>((ReadReg("Shortcuts") ?? "").Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    static string ShortcutLabel(string path) { return path.Replace("\t", " > "); }
+
+    // Volume and Lights fill in their state only when opened, so they're read before use.
+    static bool ReadsDevices(string path) { return path.StartsWith("Volume\t") || path.StartsWith("Lights\t"); }
+
+    // An item's name without the state some labels carry ("HDR: on", "LG TV - off", "Lamp (no power)").
+    static string ItemKey(string text)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(text, @"^(HDR|Projector|Sound|Subwoofer):");
+        if (m.Success) return m.Groups[1].Value;
+        text = System.Text.RegularExpressions.Regex.Replace(text, @" - (on|off)$", "");
+        return System.Text.RegularExpressions.Regex.Replace(text, @" \((no power|Theatre room only|\d+x\d+)\)$", "");
+    }
+
+    static ToolStripMenuItem FindItem(ToolStripItemCollection items, string[] parts, int depth)
+    {
+        foreach (ToolStripItem i in items)
+        {
+            var mi = i as ToolStripMenuItem;
+            if (mi == null || NoShortcut.Equals(mi.Tag) || ItemKey(mi.Text) != parts[depth]) continue;
+            if (depth == parts.Length - 1) return mi.HasDropDownItems ? null : mi;
+            return FindItem(mi.DropDownItems, parts, depth + 1);
+        }
+        return null;
+    }
+
+    static void CollectItems(ToolStripItemCollection items, string prefix, List<string> paths)
+    {
+        foreach (ToolStripItem i in items)
+        {
+            var mi = i as ToolStripMenuItem;
+            if (mi == null || NoShortcut.Equals(mi.Tag)) continue;
+            string path = prefix + ItemKey(mi.Text);
+            if (mi.HasDropDownItems) CollectItems(mi.DropDownItems, path + "\t", paths);
+            else if (!paths.Contains(path)) paths.Add(path);
+        }
+    }
+
+    void AddShortcuts(ContextMenuStrip menu)
+    {
+        menu.Items.Add(new ToolStripSeparator());
+        foreach (string saved in ReadShortcuts())
+        {
+            string path = saved;
+            var item = new ToolStripMenuItem(ShortcutLabel(path), null, (s, e) => Ui(delegate { RunShortcut(path); })) { Tag = NoShortcut };
+            if (!ReadsDevices(path))
+            {
+                ToolStripMenuItem target = FindItem(menu.Items, path.Split('\t'), 0);
+                if (target != null) { item.Checked = target.Checked; item.Enabled = target.Enabled; }
+            }
+            menu.Items.Add(item);
+        }
+        menu.Items.Add(new ToolStripMenuItem("Edit shortcuts...", null, (s, e) => Ui(delegate { EditShortcuts(); })) { Tag = NoShortcut });
+        menu.Items.Add(new ToolStripSeparator());
+    }
+
+    // A menu copy that's never shown, so it holds no window and needs no disposing. Calls done with
+    // Volume and Lights read first; done runs on the UI thread.
+    ContextMenuStrip FreshMenu(bool readVolume, bool readLights, Action done)
+    {
+        var copy = new ContextMenuStrip();
+        FillMenu(copy);
+        Action lights = () => { if (readLights && hueMenu != null) hueMenu.Load(done); else done(); };
+        if (readVolume && roomSound != null) roomSound.Load(lights); else lights();
+        return copy;
+    }
+
+    void RunShortcut(string path)
+    {
+        ContextMenuStrip copy = null;
+        bool volume = path.StartsWith("Volume\t");
+        Action click = null;
+        click = () =>
+        {
+            ToolStripMenuItem target = FindItem(copy.Items, path.Split('\t'), 0);
+            if (target == null) Notify("Shortcut not available right now: " + ShortcutLabel(path), true);
+            else if (!target.Enabled) Notify("Not available right now: " + ShortcutLabel(path), true);
+            else target.PerformClick();
+            if (volume && roomSound != null) roomSound.Release();
+        };
+        bool ready = false;                              // done can run before FreshMenu has returned
+        copy = FreshMenu(volume, path.StartsWith("Lights\t"), () => { if (ready) click(); else ready = true; });
+        if (ready) click(); else ready = true;
+    }
+
+    void EditShortcuts()
+    {
+        ContextMenuStrip copy = null;
+        Action show = () =>
+        {
+            var paths = new List<string>();
+            CollectItems(copy.Items, "", paths);
+            if (roomSound != null) roomSound.Release();
+            List<string> saved = ReadShortcuts();
+            foreach (string s in saved) if (!paths.Contains(s)) paths.Add(s);      // not there right now: keep it
+            using (var f = new Form { Text = "ModeSwitch shortcuts", StartPosition = FormStartPosition.CenterScreen, TopMost = true, ClientSize = new Size(620, 640),
+                                      MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
+            {
+                var note = new Label { Text = "Tick the items to show above Exit in the tray menu.", Dock = DockStyle.Top, Height = 28, TextAlign = ContentAlignment.MiddleLeft };
+                var list = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, IntegralHeight = false };
+                foreach (string p in paths) list.Items.Add(ShortcutLabel(p), saved.Contains(p));
+                var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Size = new Size(90, 28), Location = new Point(420, 8) };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Size = new Size(90, 28), Location = new Point(520, 8) };
+                var buttons = new Panel { Dock = DockStyle.Bottom, Height = 44 };
+                buttons.Controls.Add(ok);
+                buttons.Controls.Add(cancel);
+                f.Controls.Add(list);
+                f.Controls.Add(note);
+                f.Controls.Add(buttons);
+                f.AcceptButton = ok;
+                f.CancelButton = cancel;
+                if (f.ShowDialog() != DialogResult.OK) return;
+                // Existing shortcuts stay in their order, new ones go after them.
+                var ticked = new List<string>();
+                foreach (int i in list.CheckedIndices) ticked.Add(paths[i]);
+                var result = saved.FindAll(ticked.Contains);
+                result.AddRange(ticked.FindAll(p => !saved.Contains(p)));
+                WriteReg("Shortcuts", string.Join("\n", result.ToArray()));
+            }
+        };
+        bool ready = false;                              // done can run before FreshMenu has returned
+        copy = FreshMenu(true, true, () => { if (ready) show(); else ready = true; });
+        if (ready) show(); else ready = true;
     }
 
     // "Projector: <state>" with 2D / 3D Over-Under / 3D Side-by-Side, when projector.ip is set.
@@ -1711,7 +1853,7 @@ class ModeSwitchApp : ApplicationContext
         // Picture presets, listed right here under a heading. The projector keeps a separate preset
         // for 3D, so in 3D these pick the 3D one.
         item.DropDownItems.Add(new ToolStripSeparator());
-        var heading = new ToolStripMenuItem(in3D ? "Picture preset (3D):" : "Picture preset:");
+        var heading = new ToolStripMenuItem(in3D ? "Picture preset (3D):" : "Picture preset:") { Tag = NoShortcut };
         heading.Enabled = false;
         item.DropDownItems.Add(heading);
         for (int i = 0; i < PjPicture.Presets.Length; i++)
@@ -1747,7 +1889,7 @@ class ModeSwitchApp : ApplicationContext
         catch (Exception ex) { state = "unavailable (" + ex.Message + ")"; }
 
         var item = new ToolStripMenuItem("Sound: " + state);
-        var output = new ToolStripMenuItem("Output: " + device);
+        var output = new ToolStripMenuItem("Output: " + device) { Tag = NoShortcut };
         output.Enabled = false;
         item.DropDownItems.Add(output);
         item.DropDownItems.Add(new ToolStripSeparator());
@@ -2505,6 +2647,14 @@ class ModeSwitchApp : ApplicationContext
                 log.AppendLine(e == null ? "Receiver: off" : "Receiver FAILED: " + e);
             }
             timed("devices off");
+
+            // Only when arriving from the Theatre room, so re-selecting TV leaves the lights alone.
+            if (room != "tv")
+            {
+                string hueLine = RecallHueLights();
+                if (hueLine != null) log.AppendLine(hueLine);
+                timed("hue");
+            }
         }
 
         room = target;
@@ -2925,6 +3075,62 @@ class ModeSwitchApp : ApplicationContext
         });
     }
 
+    // "Room setup > Pair Hue bridge": registers with the bridge and remembers the key. The first
+    // time, this also saves the lights as they are at that moment.
+    void PairHue()
+    {
+        string ip = cfg.Get("hue.ip", "");
+        if (ip.Length == 0) { Notify("Set hue.ip in config.local.ini first", true); return; }
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            string key, text;
+            bool buttonNeeded;
+            string err = Hue.Pair(ip, out key, out buttonNeeded);
+            if (buttonNeeded) text = "Hue pairing FAILED: press the button on the bridge, then pair within 30 s";
+            else if (err != null) text = "Hue pairing FAILED: " + err;
+            else
+            {
+                bool first = ReadReg("HueKey") == null;
+                WriteReg("HueKey", key);
+                text = "Hue bridge paired";
+                if (first) text += "\n" + StoreHueLights();
+            }
+            WriteLog("pair hue", text);
+            Say(text, IsProblem(text));
+        });
+    }
+
+    // "Room setup > Save Hue lights": the lights as they are now become the TV room's lights.
+    void SaveHueLights()
+    {
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            string text = StoreHueLights();
+            WriteLog("save hue lights", text);
+            Say(text, IsProblem(text));
+        });
+    }
+
+    string StoreHueLights()
+    {
+        string ip = cfg.Get("hue.ip", ""), key = ReadReg("HueKey"), group = cfg.Get("hue.tv.group", "Bedroom");
+        if (ip.Length == 0 || key == null) return "Hue lights FAILED: pair the bridge first (Room setup > Pair Hue bridge)";
+        string err = Hue.SaveLights(ip, key, group);
+        return err == null ? "Hue lights saved: " + group : "Hue lights FAILED: " + err;
+    }
+
+    // Returns a log line, or null when Hue isn't set up.
+    string RecallHueLights()
+    {
+        string ip = cfg.Get("hue.ip", ""), key = ReadReg("HueKey"), group = cfg.Get("hue.tv.group", "Bedroom");
+        if (ip.Length == 0 || key == null || group.Length == 0) return null;
+        bool saved;
+        string err = Hue.RecallLights(ip, key, group, out saved);
+        return err != null ? "Hue lights FAILED: " + err
+             : saved ? "Hue lights: " + group
+             : "Hue lights: none saved yet (Room setup > Save Hue lights)";
+    }
+
     // "Room setup > Subwoofer plug login": TP-Link account for the Tapo plug, stored encrypted.
     void AskTapoLogin()
     {
@@ -2962,6 +3168,7 @@ class ModeSwitchApp : ApplicationContext
 
     // The "Volume" submenu (TV and receiver volume, TV sound output).
     RoomSoundMenu roomSound;
+    HueMenu hueMenu;
 
     // "Room setup > Subwoofer": one item, ticked while the sub is on; a click switches it over.
     // The plug's state is read in the background when Room setup opens (a Tapo login takes ~1 s).

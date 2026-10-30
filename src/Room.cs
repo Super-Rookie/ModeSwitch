@@ -1,5 +1,5 @@
 // Room.cs - the devices behind ModeSwitch's TV / Theatre switch: LG webOS TV, Sony network
-// receiver, TP-Link Tapo smart plug, and which display Windows uses.
+// receiver, TP-Link Tapo smart plug, Philips Hue bridge, and which display Windows uses.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -690,6 +690,266 @@ sealed class Tapo
             Thread.Sleep(1000);
         }
         return err;
+    }
+}
+
+// ---------------------------------------------------------------- Philips Hue bridge
+// The bridge's local REST API (v1). Pressing the bridge's button lets one app register for a key.
+// A room's lights are kept as a Hue scene on the bridge, so it also shows up in the Hue app.
+sealed class HueLight
+{
+    public string Id, Name;
+    public bool On, Reachable;
+    public int Brightness;                    // 1..254
+    public bool HasColour, HasWhite;          // can show colours / shades of white
+    public double X = 0.3127, Y = 0.329;      // its current colour (CIE xy); starts as plain white
+}
+
+static class Hue
+{
+    const string SceneName = "ModeSwitch TV";
+
+    // Returns null on success, or the bridge's first error. errorType = its error number, if any.
+    static string Call(string ip, string method, string path, object body, out object result, out int errorType)
+    {
+        result = null;
+        errorType = 0;
+        try
+        {
+            var req = (HttpWebRequest)WebRequest.Create("http://" + ip + "/api" + path);
+            req.Method = method;
+            req.Timeout = 5000;
+            req.ReadWriteTimeout = 5000;
+            if (body != null)
+            {
+                req.ContentType = "application/json";
+                byte[] b = Encoding.UTF8.GetBytes(Json.Write(body));
+                using (var s = req.GetRequestStream()) s.Write(b, 0, b.Length);
+            }
+            string text;
+            using (var resp = req.GetResponse())
+            using (var r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) text = r.ReadToEnd();
+            result = new JavaScriptSerializer().DeserializeObject(text);
+            var list = result as object[];
+            if (list != null)
+                foreach (object item in list)
+                {
+                    object error = Json.Get(item, "error");
+                    if (error == null) continue;
+                    errorType = Convert.ToInt32(Json.Get(error, "type"));
+                    return Convert.ToString(Json.Get(error, "description"));
+                }
+            return null;
+        }
+        catch (WebException ex) { return ex.Status == WebExceptionStatus.ConnectFailure || ex.Status == WebExceptionStatus.Timeout ? "not reachable (" + ip + ")" : ex.Message; }
+        catch (Exception ex) { return ex.Message; }
+    }
+
+    // Works only within 30 s of the bridge's button being pressed. buttonNeeded = it wasn't.
+    public static string Pair(string ip, out string key, out bool buttonNeeded)
+    {
+        object r;
+        int type;
+        key = null;
+        string err = Call(ip, "POST", "", new Dictionary<string, object> { { "devicetype", "ModeSwitch#PC" } }, out r, out type);
+        buttonNeeded = type == 101;
+        if (err != null) return err;
+        var list = r as object[];
+        key = list != null && list.Length > 0 ? Json.Get(list[0], "success", "username") as string : null;
+        return key == null ? "the bridge sent no key" : null;
+    }
+
+    static string FindGroup(string ip, string key, string name, out string id)
+    {
+        object r;
+        int type;
+        id = null;
+        string err = Call(ip, "GET", "/" + key + "/groups", null, out r, out type);
+        if (err != null) return err;
+        var groups = r as Dictionary<string, object>;
+        if (groups == null) return "the bridge sent no rooms";
+        var names = new List<string>();
+        foreach (var g in groups)
+        {
+            string n = Json.Get(g.Value, "name") as string;
+            if (n == null) continue;
+            if (n.Equals(name, StringComparison.OrdinalIgnoreCase)) { id = g.Key; return null; }
+            names.Add(n);
+        }
+        return "no room or zone called '" + name + "' (the bridge has: " + string.Join(", ", names.ToArray()) + ")";
+    }
+
+    static string FindScene(string ip, string key, string group, out string id)
+    {
+        object r;
+        int type;
+        id = null;
+        string err = Call(ip, "GET", "/" + key + "/scenes", null, out r, out type);
+        if (err != null) return err;
+        var scenes = r as Dictionary<string, object>;
+        if (scenes != null)
+            foreach (var s in scenes)
+                if ((Json.Get(s.Value, "name") as string) == SceneName && (Json.Get(s.Value, "group") as string) == group) { id = s.Key; break; }
+        return null;
+    }
+
+    // Stores how the group's lights are right now, including which ones are off.
+    public static string SaveLights(string ip, string key, string groupName)
+    {
+        object r;
+        int type;
+        string group, scene;
+        string err = FindGroup(ip, key, groupName, out group);
+        if (err == null) err = FindScene(ip, key, group, out scene); else return err;
+        if (err != null) return err;
+        return scene != null
+            ? Call(ip, "PUT", "/" + key + "/scenes/" + scene, new Dictionary<string, object> { { "storelightstate", true } }, out r, out type)
+            : Call(ip, "POST", "/" + key + "/scenes", new Dictionary<string, object> { { "name", SceneName }, { "type", "GroupScene" }, { "group", group }, { "recycle", false } }, out r, out type);
+    }
+
+    // A group's lights and scenes, for the Lights menu. Scenes are (id, name), sorted by name.
+    public static string ReadGroup(string ip, string key, string groupName, out string group, out List<HueLight> lights, out List<KeyValuePair<string, string>> scenes)
+    {
+        object r, all;
+        int type;
+        lights = new List<HueLight>();
+        scenes = new List<KeyValuePair<string, string>>();
+        string err = FindGroup(ip, key, groupName, out group);
+        if (err == null) err = Call(ip, "GET", "/" + key + "/groups/" + group, null, out r, out type); else return err;
+        if (err == null) err = Call(ip, "GET", "/" + key + "/lights", null, out all, out type); else return err;
+        if (err != null) return err;
+        var ids = Json.Get(r, "lights") as object[];
+        if (ids != null)
+            foreach (object o in ids)
+            {
+                string id = Convert.ToString(o);
+                object light = Json.Get(all, id);
+                if (light == null) continue;
+                object bri = Json.Get(light, "state", "bri");
+                var xy = Json.Get(light, "state", "xy") as object[];
+                var entry = new HueLight
+                {
+                    Id = id,
+                    Name = Convert.ToString(Json.Get(light, "name")),
+                    On = true.Equals(Json.Get(light, "state", "on")),
+                    Reachable = true.Equals(Json.Get(light, "state", "reachable")),
+                    Brightness = bri != null ? Convert.ToInt32(bri) : 254,
+                    HasColour = xy != null && xy.Length == 2,
+                    HasWhite = Json.Get(light, "state", "ct") != null
+                };
+                if (entry.HasColour) { entry.X = Convert.ToDouble(xy[0]); entry.Y = Convert.ToDouble(xy[1]); }
+                lights.Add(entry);
+            }
+        lights.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+
+        err = Call(ip, "GET", "/" + key + "/scenes", null, out r, out type);
+        if (err != null) return err;
+        var found = r as Dictionary<string, object>;
+        if (found != null)
+            foreach (var s in found)
+                if ((Json.Get(s.Value, "group") as string) == group)
+                    scenes.Add(new KeyValuePair<string, string>(s.Key, Convert.ToString(Json.Get(s.Value, "name"))));
+        scenes.Sort((a, b) => string.Compare(a.Value, b.Value, StringComparison.OrdinalIgnoreCase));
+        return null;
+    }
+
+    public static string SetGroup(string ip, string key, string group, bool on)
+    {
+        object r;
+        int type;
+        return Call(ip, "PUT", "/" + key + "/groups/" + group + "/action", new Dictionary<string, object> { { "on", on } }, out r, out type);
+    }
+
+    // percent 1..100. Leaves the light's on/off alone.
+    public static string SetLightBrightness(string ip, string key, string light, int percent)
+    {
+        object r;
+        int type;
+        int bri = Math.Max(1, (int)Math.Round(percent * 254 / 100.0));
+        return Call(ip, "PUT", "/" + key + "/lights/" + light + "/state", new Dictionary<string, object> { { "bri", bri } }, out r, out type);
+    }
+
+    public static string SetLight(string ip, string key, string light, bool on)
+    {
+        object r;
+        int type;
+        return Call(ip, "PUT", "/" + key + "/lights/" + light + "/state", new Dictionary<string, object> { { "on", on } }, out r, out type);
+    }
+
+    // r, g, b 0..255. Choosing a colour for a light also switches it on (an off light refuses one).
+    public static string SetLightColour(string ip, string key, string light, int r, int g, int b)
+    {
+        object res;
+        int type;
+        double x, y;
+        RgbToXy(r, g, b, out x, out y);
+        return Call(ip, "PUT", "/" + key + "/lights/" + light + "/state", new Dictionary<string, object> { { "on", true }, { "xy", new[] { x, y } } }, out res, out type);
+    }
+
+    // mired = 1000000 / colour temperature in kelvin. Also switches the light on.
+    public static string SetLightWhite(string ip, string key, string light, int mired)
+    {
+        object r;
+        int type;
+        return Call(ip, "PUT", "/" + key + "/lights/" + light + "/state", new Dictionary<string, object> { { "on", true }, { "ct", mired } }, out r, out type);
+    }
+
+    // Philips' published sRGB (wide gamut) to CIE xy conversion, and back at full brightness.
+    public static void RgbToXy(int r, int g, int b, out double x, out double y)
+    {
+        double red = Linear(r), green = Linear(g), blue = Linear(b);
+        double cx = red * 0.664511 + green * 0.154324 + blue * 0.162028;
+        double cy = red * 0.283881 + green * 0.668433 + blue * 0.047685;
+        double cz = red * 0.000088 + green * 0.072310 + blue * 0.986039;
+        double sum = cx + cy + cz;
+        x = sum > 0 ? Math.Round(cx / sum, 4) : 0.3127;   // black has no colour: use plain white
+        y = sum > 0 ? Math.Round(cy / sum, 4) : 0.329;
+    }
+
+    public static void XyToRgb(double x, double y, out int r, out int g, out int b)
+    {
+        if (y <= 0) { r = g = b = 255; return; }
+        double cx = x / y, cz = (1 - x - y) / y;
+        double red = cx * 1.656492 - 0.354851 - cz * 0.255038;
+        double green = -cx * 0.707196 + 1.655397 + cz * 0.036152;
+        double blue = cx * 0.051713 - 0.121364 + cz * 1.011530;
+        double top = Math.Max(red, Math.Max(green, blue));
+        if (top <= 0) { r = g = b = 255; return; }
+        r = Gamma(red / top); g = Gamma(green / top); b = Gamma(blue / top);
+    }
+
+    static double Linear(int c)
+    {
+        double v = c / 255.0;
+        return v > 0.04045 ? Math.Pow((v + 0.055) / 1.055, 2.4) : v / 12.92;
+    }
+
+    static int Gamma(double v)
+    {
+        v = Math.Max(0, v);
+        v = v <= 0.0031308 ? 12.92 * v : 1.055 * Math.Pow(v, 1 / 2.4) - 0.055;
+        return Math.Max(0, Math.Min(255, (int)Math.Round(v * 255)));
+    }
+
+    public static string RecallScene(string ip, string key, string group, string scene)
+    {
+        object r;
+        int type;
+        return Call(ip, "PUT", "/" + key + "/groups/" + group + "/action", new Dictionary<string, object> { { "scene", scene } }, out r, out type);
+    }
+
+    // saved = false when SaveLights hasn't been run for this group yet.
+    public static string RecallLights(string ip, string key, string groupName, out bool saved)
+    {
+        object r;
+        int type;
+        string group, scene;
+        saved = false;
+        string err = FindGroup(ip, key, groupName, out group);
+        if (err == null) err = FindScene(ip, key, group, out scene); else return err;
+        if (err != null || scene == null) return err;
+        saved = true;
+        return Call(ip, "PUT", "/" + key + "/groups/" + group + "/action", new Dictionary<string, object> { { "scene", scene } }, out r, out type);
     }
 }
 
