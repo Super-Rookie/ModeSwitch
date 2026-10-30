@@ -1576,6 +1576,13 @@ class ModeSwitchApp : ApplicationContext
         menu.Items.Add(theatreRoom);
         if (roomSound != null) menu.Items.Add(roomSound.Build());
         if (hueMenu != null) menu.Items.Add(hueMenu.Build());
+        // Plain actions with no tick: the TV doesn't say whether VRR is on.
+        var vrr = new ToolStripMenuItem("TV VRR");
+        vrr.DropDownItems.Add(new ToolStripMenuItem("On", null, (s, e) => SetTvVrr(true, false)));
+        vrr.DropDownItems.Add(new ToolStripMenuItem("Off", null, (s, e) => SetTvVrr(false, false)));
+        vrr.DropDownItems.Add(new ToolStripMenuItem("Reset (off, then on)", null, (s, e) => SetTvVrr(false, true)));
+        vrr.Enabled = cfg.Get("tv.ip", "").Length > 0;
+        menu.Items.Add(vrr);
         var setup = new ToolStripMenuItem("Room setup");
         var subwoofer = new ToolStripMenuItem(SubwooferLabel(), null, (s, e) => ToggleSubwoofer());
         subwoofer.Checked = subState == 1;
@@ -2786,6 +2793,35 @@ class ModeSwitchApp : ApplicationContext
             }
         }
         catch { return false; }
+    }
+
+    // "TV VRR" in the tray menu. thenOn = turn it off, wait, and turn it back on, which clears the
+    // screen flashing the C6 can start after being switched on while Windows is running.
+    void SetTvVrr(bool on, bool thenOn)
+    {
+        string ip = cfg.Get("tv.ip", "");
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            string text;
+            try
+            {
+                if (!LgTv.IsUp(ip, 1500)) text = "TV VRR FAILED: the TV is off or not reachable";
+                else using (var tv = new LgTv(ip))
+                {
+                    string err = OpenTv(tv, 5000);
+                    if (err == null) err = tv.SetVrr(on);
+                    if (err == null && thenOn)
+                    {
+                        System.Threading.Thread.Sleep(3000);
+                        err = tv.SetVrr(true);
+                    }
+                    text = err != null ? "TV VRR FAILED: " + err : thenOn ? "TV VRR: reset" : "TV VRR: " + (on ? "on" : "off");
+                }
+            }
+            catch (Exception ex) { text = "TV VRR FAILED: " + ex.Message; }
+            WriteLog("tv vrr", text);
+            Say(text, IsProblem(text));
+        });
     }
 
     // The TV's picture mode for a mode (tv.picture.<mode>; TV room only): Game Optimizer for Game,

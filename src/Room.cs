@@ -272,12 +272,18 @@ sealed class LgTv : IDisposable
     // instead: a notification whose close action makes the settings call, closed straight away
     // (the method LG control libraries such as bscpylgtv use). It applies to the current input and
     // signal type (SDR or HDR), and the TV doesn't confirm it.
-    public string SetPictureMode(string mode)
+    public string SetPictureMode(string mode) { return SetSystemSetting("picture", "pictureMode", mode); }
+
+    // The Game Optimizer menu's "VRR & G-Sync" switch, found by testing on a C6 (2026). The TV doesn't
+    // say whether it's on, so this can only be set, not read.
+    public string SetVrr(bool on) { return SetSystemSetting("other", "gameOptimization", on ? "on" : "off"); }
+
+    string SetSystemSetting(string category, string setting, string value)
     {
         var call = new Dictionary<string, object>
         {
             { "uri", "luna://com.webos.settingsservice/setSystemSettings" },
-            { "params", new Dictionary<string, object> { { "category", "picture" }, { "settings", new Dictionary<string, object> { { "pictureMode", mode } } } } }
+            { "params", new Dictionary<string, object> { { "category", category }, { "settings", new Dictionary<string, object> { { setting, value } } } } }
         };
         var alert = new Dictionary<string, object>
         {

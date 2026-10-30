@@ -357,6 +357,9 @@ anything by itself, so a stray click can't change modes (and GPU scheduling) by 
   - Movie mode / 3D Movie mode / Game mode
   - **Play 3D Blu-ray / 3D film…**
   - **TV room** / **Theatre room**
+  - **TV VRR**: On, Off, and Reset (off, then on), which clears screen flashing on the C6 after it's
+    switched on while Windows is running. These set the Game Optimizer menu's VRR & G-Sync switch
+    (`gameOptimization` in the TV's settings). The TV doesn't report the state, so nothing is ticked.
   - **Shortcuts**, above Exit: any items you tick in **Edit shortcuts...**, from any submenu, one
     click away. They're stored in `HKCU\Software\ModeSwitch`.
   - **Lights**: for the Hue room or zone in `hue.tv.group`: a brightness slider for the lights
