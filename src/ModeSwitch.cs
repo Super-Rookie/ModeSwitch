@@ -1316,9 +1316,10 @@ class ModeSwitchApp : ApplicationContext
             string l = raw.Trim();
             if (l.Length == 0) continue;
             if (l.IndexOf("FAILED", StringComparison.Ordinal) >= 0 || l.IndexOf("rc=", StringComparison.Ordinal) >= 0
-                || l.IndexOf("did not take effect", StringComparison.Ordinal) >= 0 || l.IndexOf("exited", StringComparison.Ordinal) >= 0)
+                || l.IndexOf("did not take effect", StringComparison.Ordinal) >= 0 || l.IndexOf("exited", StringComparison.Ordinal) >= 0
+                || l.StartsWith("WARNING:"))
             { problems.Add(l); continue; }
-            if (l.StartsWith("stopped ") || l.StartsWith("Run bin\\")) continue;
+            if (l.StartsWith("stopped ") || l.StartsWith("Run bin\\") || l == "MPO: off") continue;
             if (l.EndsWith("not connected - resolution unchanged")) continue;   // normal while on the TV
             if (l.StartsWith("Projector: ") && l.EndsWith("settings skipped")) continue;   // projector off / TV in use
 
@@ -2247,7 +2248,8 @@ class ModeSwitchApp : ApplicationContext
         return text.IndexOf("rc=", StringComparison.Ordinal) >= 0 || text.StartsWith("failed")
             || text.IndexOf("FAILED", StringComparison.Ordinal) >= 0
             || text.IndexOf("did not take effect", StringComparison.Ordinal) >= 0
-            || text.IndexOf("exited", StringComparison.Ordinal) >= 0;
+            || text.IndexOf("exited", StringComparison.Ordinal) >= 0
+            || text.IndexOf("WARNING:", StringComparison.Ordinal) >= 0;
     }
 
     // Runs a switch on the calling (background) thread and updates the tray around it.
@@ -2423,10 +2425,30 @@ class ModeSwitchApp : ApplicationContext
         string mpcLine = SyncMpcRenderer(p, true);
         if (mpcLine != null) log.AppendLine(mpcLine);
 
+        // 7. Movie / 3D Movie: warn if multiplane overlays (MPO) are on. With them, driver 621.01
+        //    missed a flip once a second (madVR presentation glitches) and madVR couldn't get
+        //    fullscreen exclusive mode. Only reads the setting: turning MPO off is the user's call.
+        if (!isGame && cfg.GetBool("mpo.check", true)) log.AppendLine(MpoState());
+
         mode = target;
         StoreMode();
         WriteLog(target, log.ToString().TrimEnd());
         return log.ToString().TrimEnd();
+    }
+
+    // MPO is off when HKLM\SOFTWARE\Microsoft\Windows\Dwm OverlayTestMode = 5 (from the next boot).
+    static string MpoState()
+    {
+        try
+        {
+            using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\Dwm"))
+            {
+                object v = k == null ? null : k.GetValue("OverlayTestMode");
+                if (v is int && (int)v == 5) return "MPO: off";
+            }
+            return "WARNING: MPO is on - madVR may glitch (set Dwm OverlayTestMode = 5 and reboot)";
+        }
+        catch (Exception ex) { return "MPO check FAILED: " + ex.Message; }
     }
 
     // ---- picture (Settings window) ----

@@ -33,6 +33,12 @@ Afterburner's own logon task right after a reboot, which brings RTSS back and le
 video player), ModeSwitch closes them within a few seconds and notes it in the log. Set
 `apps.movie.keepclosed = false` to allow them.
 
+Movie and 3D Movie also check that Windows' multiplane overlays (MPO) are off, and warn if not
+(`mpo.check = false` turns the check off). With MPO on, NVIDIA driver 621.01 missed a frame flip
+once a second during playback, which madVR counts as presentation glitches, and madVR couldn't get
+fullscreen exclusive mode. ModeSwitch only reads the setting: MPO is off with the DWORD
+`OverlayTestMode = 5` in `HKLM\SOFTWARE\Microsoft\Windows\Dwm`, after a reboot.
+
 ## 3D Movie mode
 
 A third mode, chosen from the right-click menu like the others. It shows a purple **3D** icon.
